@@ -5,7 +5,7 @@ import random
 import time
 import pyray as rl
 from collections.abc import Callable
-from openpilot.system.ui.lib.application import gui_app, FontWeight, MousePos, MouseEvent, FONT_SCALE
+from openpilot.system.ui.lib.application import gui_app, FontWeight, MousePos, MouseEvent, FONT_SCALE, font_fallback
 from openpilot.system.ui.lib.multilang import tr
 from openpilot.system.ui.lib.scroll_panel2 import GuiScrollPanel2
 from openpilot.system.ui.lib.text_measure import measure_text_cached
@@ -382,7 +382,23 @@ def point_hits(mouse_pos: MousePos, rect: rl.Rectangle, parent_rect: rl.Rectangl
   return hit.width > 0 and hit.height > 0 and rl.check_collision_point_rec(mouse_pos, hit)
 
 
+_WRAP_TEXT_CACHE: dict[tuple, tuple[str, ...]] = {}
+_WRAP_TEXT_CACHE_MAX = 4096
+
+
 def wrap_text(font: rl.Font, text: str, max_width: float, font_size: float, max_lines: int = 2) -> list[str]:
+  # Tiles re-wrap their labels every frame; the result only depends on these inputs.
+  key = (font_fallback(font), text, max_width, font_size, max_lines)
+  cached = _WRAP_TEXT_CACHE.get(key)
+  if cached is None:
+    if len(_WRAP_TEXT_CACHE) >= _WRAP_TEXT_CACHE_MAX:
+      _WRAP_TEXT_CACHE.clear()
+    cached = tuple(_wrap_text_uncached(font, text, max_width, font_size, max_lines))
+    _WRAP_TEXT_CACHE[key] = cached
+  return list(cached)
+
+
+def _wrap_text_uncached(font: rl.Font, text: str, max_width: float, font_size: float, max_lines: int) -> list[str]:
   spacing = font_size * 0.15
   words = text.split()
   lines: list[str] = []

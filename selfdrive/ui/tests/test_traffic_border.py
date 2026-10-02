@@ -32,7 +32,7 @@ def _setup(monkeypatch, *, car_state, signal=True, blindspot=True, v_asm_enabled
   )
   monkeypatch.setattr(ui_state, "starpilot_toggles", {"v_asm_enabled": v_asm_enabled})
   monkeypatch.setattr(ui_state, "params_memory", object())
-  monkeypatch.setattr(starpilot_border, "get_fresh_vasm_state", lambda _memory: v_asm)
+  monkeypatch.setattr(starpilot_border, "get_fresh_vasm_state_cached", lambda _memory: v_asm)
   monkeypatch.setattr(starpilot_border.rl, "get_time", lambda: time)
 
 

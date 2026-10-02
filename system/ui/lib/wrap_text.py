@@ -38,6 +38,7 @@ def _break_long_word(font: rl.Font, word: str, font_size: int, max_width: int, s
 
 
 _cache: dict[int, list[str]] = {}
+_CACHE_MAX_ENTRIES = 4096
 
 
 def wrap_text(font: rl.Font, text: str, font_size: int, max_width: int, spacing: float = 0) -> list[str]:
@@ -103,5 +104,7 @@ def wrap_text(font: rl.Font, text: str, font_size: int, max_width: int, spacing:
     # Add all lines from this paragraph
     all_lines.extend(lines)
 
+  if len(_cache) >= _CACHE_MAX_ENTRIES:
+    _cache.clear()
   _cache[key] = all_lines
   return all_lines

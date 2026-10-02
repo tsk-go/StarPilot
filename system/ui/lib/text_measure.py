@@ -3,6 +3,8 @@ from openpilot.system.ui.lib.application import FONT_SCALE, font_fallback
 from openpilot.system.ui.lib.emoji import find_emoji
 
 _cache: dict[int, rl.Vector2] = {}
+# Changing strings (speeds, timers, debug metrics) would otherwise grow this forever.
+_CACHE_MAX_ENTRIES = 8192
 
 
 def draw_text_with_shadow(font: rl.Font, text: str, pos: rl.Vector2, font_size: int, color: rl.Color,
@@ -38,5 +40,7 @@ def measure_text_cached(font: rl.Font, text: str, font_size: int, spacing: float
     if result.y == 0:
       result.y = font_size * FONT_SCALE
 
+  if len(_cache) >= _CACHE_MAX_ENTRIES:
+    _cache.clear()
   _cache[key] = result
   return result

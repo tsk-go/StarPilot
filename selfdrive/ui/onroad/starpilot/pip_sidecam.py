@@ -9,7 +9,7 @@ import pyray as rl
 
 from msgq.visionipc import VisionIpcClient, VisionStreamType
 from openpilot.selfdrive.ui.ui_state import ui_state
-from openpilot.starpilot.common.vision_bsm import get_fresh_vasm_state
+from openpilot.starpilot.common.vision_bsm import get_fresh_vasm_state_cached
 from openpilot.system.ui.widgets import Widget
 
 PIP_SHADER_VERSION = """
@@ -292,7 +292,7 @@ class PipSideCamera(Widget):
     if car_state is None:
       return []
 
-    vasm_left, vasm_right = get_fresh_vasm_state(self._params_memory)
+    vasm_left, vasm_right = get_fresh_vasm_state_cached(self._params_memory)
 
     left_blinker = bool(car_state.leftBlinker)
     right_blinker = bool(car_state.rightBlinker)

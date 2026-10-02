@@ -314,6 +314,15 @@ class UpdateAlert(AbstractAlert):
     self._wrapped_release_notes = ""
     self._cached_content_height: float = 0.0
     self._html_renderer = HtmlRenderer(text="")
+    self._parsed_html: str | None = None
+
+  def _set_html(self, html: str) -> None:
+    # refresh() runs every 10s on the render thread; only re-parse when the notes change.
+    if html == self._parsed_html:
+      return
+    self._html_renderer.parse_html_content(html)
+    self._parsed_html = html
+    self._cached_content_height = 0
 
   def refresh(self) -> bool:
     update_available: bool = self.params.get_bool("UpdateAvailable")
@@ -321,10 +330,9 @@ class UpdateAlert(AbstractAlert):
 
     if update_available:
       self.release_notes = (self.params.get("UpdaterNewReleaseNotes") or b"").decode("utf8").strip()
-      self._html_renderer.parse_html_content(self.release_notes or no_release_notes)
-      self._cached_content_height = 0
+      self._set_html(self.release_notes or no_release_notes)
     else:
-      self._html_renderer.parse_html_content(no_release_notes)
+      self._set_html(no_release_notes)
 
     return update_available
 

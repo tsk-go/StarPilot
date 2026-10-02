@@ -239,18 +239,24 @@ def _draw_strip_vertex_gradient(tri_strip: np.ndarray, gradient: Gradient, origi
   rl_color = raw_rl.rlColor4ub
   rl_vertex = raw_rl.rlVertex2f
 
+  # Index plain Python lists inside the per-vertex loop: element access on numpy
+  # arrays (and passing numpy scalars through cffi) is several times slower.
+  rs, gs, bs, as_ = r.tolist(), g.tolist(), b.tolist(), a.tolist()
+  xs = tri_strip[:, 0].tolist()
+  ys = tri_strip[:, 1].tolist()
+
   rl_begin(4)  # RL_TRIANGLES
   for i in range(2, n):
     if i % 2 == 0:
       i0, i1, i2 = i, i - 2, i - 1
     else:
       i0, i1, i2 = i, i - 1, i - 2
-    rl_color(r[i0], g[i0], b[i0], a[i0])
-    rl_vertex(tri_strip[i0, 0], tri_strip[i0, 1])
-    rl_color(r[i1], g[i1], b[i1], a[i1])
-    rl_vertex(tri_strip[i1, 0], tri_strip[i1, 1])
-    rl_color(r[i2], g[i2], b[i2], a[i2])
-    rl_vertex(tri_strip[i2, 0], tri_strip[i2, 1])
+    rl_color(rs[i0], gs[i0], bs[i0], as_[i0])
+    rl_vertex(xs[i0], ys[i0])
+    rl_color(rs[i1], gs[i1], bs[i1], as_[i1])
+    rl_vertex(xs[i1], ys[i1])
+    rl_color(rs[i2], gs[i2], bs[i2], as_[i2])
+    rl_vertex(xs[i2], ys[i2])
   rl_end()
 
 

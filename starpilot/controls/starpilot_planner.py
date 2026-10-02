@@ -139,11 +139,11 @@ class StarPilotPlanner:
     }
     self.gps_valid = self.gps_position["hasFix"] and (self.gps_position["latitude"] != 0 or self.gps_position["longitude"] != 0)
     bearing = self.gps_position["bearing"]
-    if self.gps_valid:
+    now_mono = self.gps_position["updatedAtMonotonic"]
+    if self.gps_valid and (now_mono - self._last_gps_memory_write) >= 0.25:
+      # Check the rate limit before serializing; this runs on every 20Hz planner cycle.
       gps_memory_state = json.dumps(_sanitize_json_value(self.gps_position), allow_nan=False)
-      now_mono = self.gps_position["updatedAtMonotonic"]
-      should_refresh_memory = gps_memory_state != self._last_gps_memory_state and (now_mono - self._last_gps_memory_write) >= 0.25
-      if should_refresh_memory:
+      if gps_memory_state != self._last_gps_memory_state:
         self.params_memory.put_nonblocking("LastGPSPosition", gps_memory_state)
         self._last_gps_memory_state = gps_memory_state
         self._last_gps_memory_write = now_mono

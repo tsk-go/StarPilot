@@ -5,7 +5,7 @@ import os
 import random
 import tomllib
 
-from functools import cache
+from functools import cache, lru_cache
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -374,7 +374,9 @@ def get_starpilot_toggles(sm=messaging.SubMaster(["starpilotPlan"]), *, read_per
     toggles.rivian_angle_control = get_starpilot_toggles._params.get_bool("RivianAngleControl")
   return toggles
 
-@cache
+# Bounded: the serialized toggles change on every refresh (e.g. random themes),
+# and an unbounded cache keeps every ~20KB variant alive for the process lifetime.
+@lru_cache(maxsize=8)
 def process_starpilot_toggles(toggles):
   if toggles:
     return SimpleNamespace(**json.loads(toggles))

@@ -77,3 +77,32 @@ def test_restore_persisted_cc_state_rehydrates_manual_override():
 
   assert restored_status == CCStatus["USER_CHILL"]
   assert params_memory.get_int(CC_STATUS_PARAM) == CCStatus["USER_CHILL"]
+
+
+def test_restore_persisted_ce_state_skips_redundant_persistent_writes():
+  from openpilot.starpilot.common.experimental_state import (
+    PERSIST_EXPERIMENTAL_STATE_PARAM,
+    PERSISTED_CE_STATUS_PARAM,
+    restore_persisted_ce_state,
+  )
+
+  class CountingParams(FakeParams):
+    puts = 0
+
+    def put_int(self, key, value):
+      self.puts += 1
+      super().put_int(key, value)
+
+  params = CountingParams(bools={PERSIST_EXPERIMENTAL_STATE_PARAM: True})
+  params_memory = FakeParams(ints={CE_STATUS_PARAM: CEStatus["USER_OVERRIDDEN"]})
+
+  for _ in range(20):
+    restore_persisted_ce_state(params, params_memory)
+
+  assert params.ints[PERSISTED_CE_STATUS_PARAM] == CEStatus["USER_OVERRIDDEN"]
+  assert params.puts == 1
+
+  params_memory.put_int(CE_STATUS_PARAM, CEStatus["USER_DISABLED"])
+  restore_persisted_ce_state(params, params_memory)
+  assert params.ints[PERSISTED_CE_STATUS_PARAM] == CEStatus["USER_DISABLED"]
+  assert params.puts == 2

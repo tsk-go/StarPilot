@@ -256,6 +256,9 @@ class SelfdriveD:
     self.big_model_active = False
     self.big_model_failed = False
     self.big_model_ready_t = 0.
+    # Sampled at 10Hz in params_thread instead of on every 100Hz update.
+    self.usb_gpu_loading = self.params.get_bool("UsbGpuLoading")
+    self.usb_gpu_active = self.params.get("UsbGpuActive")
     self.experimental_mode = False
     self.ecu_disable_failed = False
     self.ecu_disable_failed_checked = not (
@@ -391,7 +394,7 @@ class SelfdriveD:
       self.events.add(EventName.joystickDebug)
       self.startup_event = None
 
-    loading = self.params.get_bool("UsbGpuLoading")
+    loading = self.usb_gpu_loading
     if loading:
       self.big_model_attempted = True
     if self.big_model_loading and not loading:
@@ -400,7 +403,7 @@ class SelfdriveD:
     if loading:
       self.events.add(EventName.bigModelLoading)
 
-    big_active = self.params.get("UsbGpuActive")
+    big_active = self.usb_gpu_active
     model_unavailable = self.big_model_active and self.sm.seen['modelV2'] and not self.sm.alive['modelV2']
     big_failed = self.big_model_attempted and not loading and (big_active is False or model_unavailable)
     if big_failed and not self.big_model_failed:
@@ -997,6 +1000,8 @@ class SelfdriveD:
       self.is_metric = self.params.get_bool("IsMetric")
       self.is_ldw_enabled = self.params.get_bool("IsLdwEnabled")
       self.disengage_on_accelerator = self.params.get_bool("DisengageOnAccelerator")
+      self.usb_gpu_loading = self.params.get_bool("UsbGpuLoading")
+      self.usb_gpu_active = self.params.get("UsbGpuActive")
       if REPLAY:
         if self.safe_mode:
           self.experimental_mode = False

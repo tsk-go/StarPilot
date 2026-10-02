@@ -67,24 +67,31 @@ def get_persisted_cc_status(params: Params) -> int:
   return normalize_persisted_cc_status(params.get_int(PERSISTED_CC_STATUS_PARAM, default=CCStatus["OFF"]))
 
 
+def _put_int_if_changed(params: Params, key: str, value: int) -> None:
+  # These are synced from the 20Hz planner loop. A persistent put does a
+  # temp-file write plus two fsyncs, so skip it when the value is unchanged.
+  if params.get_int(key, default=-1) != value:
+    params.put_int(key, value)
+
+
 def set_persisted_ce_status(params: Params, status: int) -> int:
   normalized = normalize_persisted_ce_status(status)
-  params.put_int(PERSISTED_CE_STATUS_PARAM, normalized)
+  _put_int_if_changed(params, PERSISTED_CE_STATUS_PARAM, normalized)
   return normalized
 
 
 def set_persisted_cc_status(params: Params, status: int) -> int:
   normalized = normalize_persisted_cc_status(status)
-  params.put_int(PERSISTED_CC_STATUS_PARAM, normalized)
+  _put_int_if_changed(params, PERSISTED_CC_STATUS_PARAM, normalized)
   return normalized
 
 
 def clear_persisted_ce_status(params: Params) -> None:
-  params.put_int(PERSISTED_CE_STATUS_PARAM, CEStatus["OFF"])
+  _put_int_if_changed(params, PERSISTED_CE_STATUS_PARAM, CEStatus["OFF"])
 
 
 def clear_persisted_cc_status(params: Params) -> None:
-  params.put_int(PERSISTED_CC_STATUS_PARAM, CCStatus["OFF"])
+  _put_int_if_changed(params, PERSISTED_CC_STATUS_PARAM, CCStatus["OFF"])
 
 
 def sync_persist_experimental_state(params: Params, params_memory: Params | None, enabled: bool) -> None:

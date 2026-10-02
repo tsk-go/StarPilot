@@ -308,9 +308,9 @@ class StarPilotVCruise:
     return max(float(getattr(car_params, "minSteerSpeed", 0.0) or 0.0), 0.0)
 
   def _get_nav_turn_control_target(self, v_cruise, sm, starpilot_toggles):
-    self._update_nav_instruction_state()
     if not getattr(starpilot_toggles, "nav_longitudinal_allowed", False):
       return 0.0
+    self._update_nav_instruction_state()
     if not bool(self._nav_instruction_state.get("valid", False)):
       return 0.0
 

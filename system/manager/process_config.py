@@ -32,13 +32,24 @@ def ublox_available() -> bool:
   return os.path.exists('/dev/ttyHS0') and not os.path.exists('/persist/comma/use-quectel-gps')
 
 
+_car_gps_cache: tuple[bytes, bool] | None = None
+
+
+def _car_gps_available_from_bytes(car_params: bytes) -> bool:
+  # Called several times per manager loop; only re-parse CarParams when it changes.
+  global _car_gps_cache
+  if _car_gps_cache is None or _car_gps_cache[0] != car_params:
+    with car.CarParams.from_bytes(car_params) as CP:
+      _car_gps_cache = (car_params, car_gps_available(CP))
+  return _car_gps_cache[1]
+
+
 def update_car_gps_param(params: Params) -> bool | None:
   car_params = params.get("CarParams")
   if car_params is None:
     return None
 
-  with car.CarParams.from_bytes(car_params) as CP:
-    available = car_gps_available(CP)
+  available = _car_gps_available_from_bytes(car_params)
   if available != params.get_bool("CarGpsAvailable"):
     params.put_bool("CarGpsAvailable", available)
   return available

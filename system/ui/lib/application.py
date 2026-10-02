@@ -527,7 +527,7 @@ class GuiApplication:
     self._pending_render_textures: dict[str, tuple[int, int, Callable[[], None]]] = {}
     self._target_fps: int = _DEFAULT_FPS
     self._full_target_fps: int = _DEFAULT_FPS
-    self._idle_target_fps: int = max(10, _DEFAULT_FPS // 4)
+    self._idle_target_fps: int = max(10, _DEFAULT_FPS // 2)
     self._adaptive_rendering = False
     self._full_rate_rendering = False
     self._high_fps_until = 0.0
@@ -590,7 +590,9 @@ class GuiApplication:
     # the producer rate would make idle portions play back too quickly.
     self._adaptive_rendering = bool(enabled and not OFFSCREEN and not RECORD)
     if idle_fps is None or idle_fps <= 0:
-      idle_fps = UI_IDLE_FPS if UI_IDLE_FPS > 0 else max(10, self._full_target_fps // 4)
+      # Half rate rather than a quarter: at 15 FPS the first touch after idling could
+      # wait ~67ms to be picked up, which reads as lag. UI_IDLE_FPS still overrides.
+      idle_fps = UI_IDLE_FPS if UI_IDLE_FPS > 0 else max(10, self._full_target_fps // 2)
     self._idle_target_fps = min(self._full_target_fps, max(1, int(idle_fps)))
     self._full_rate_rendering = False
     self._high_fps_until = time.monotonic() + UI_INTERACTION_FPS_DURATION if self._adaptive_rendering else 0.0

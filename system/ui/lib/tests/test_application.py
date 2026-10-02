@@ -24,12 +24,12 @@ def test_big_ui_adaptive_fps_uses_60_active_15_idle(monkeypatch):
   app._set_target_fps = applied_targets.append
 
   app.configure_adaptive_rendering(True)
-  assert app._idle_target_fps == 15
+  assert app._idle_target_fps == 30
   assert applied_targets[-1] == 60
 
   now[0] += application.UI_INTERACTION_FPS_DURATION + 0.01
   app._apply_render_mode()
-  assert applied_targets[-1] == 15
+  assert applied_targets[-1] == 30
 
   app.set_render_mode(True)
   assert applied_targets[-1] == 60

@@ -64,6 +64,7 @@ StarPilotEventName = custom.StarPilotOnroadEvent.EventName
 
 IGNORED_SAFETY_MODES = (SafetyModel.silent, SafetyModel.noOutput)
 VALID_ONLY_COMM_ISSUE_GRACE_FRAMES = max(1, round(0.5 / DT_CTRL))
+PARAM_POLL_FRAMES = 5  # sample memory params every 5th 100Hz update (20Hz)
 
 
 def evaluate_comm_issue(all_checks: bool, all_alive: bool, all_freq_ok: bool,
@@ -256,6 +257,8 @@ class SelfdriveD:
     self.big_model_active = False
     self.big_model_failed = False
     self.big_model_ready_t = 0.
+    self._param_poll_frame = 0
+    self.switchback_mode_enabled = False
     # Sampled at 10Hz in params_thread instead of on every 100Hz update.
     self.usb_gpu_loading = self.params.get_bool("UsbGpuLoading")
     self.usb_gpu_active = self.params.get("UsbGpuActive")
@@ -375,10 +378,17 @@ class SelfdriveD:
     self.events.clear()
     self.starpilot_events.clear()
 
-    controller_engage_requested = self._consume_controller_openpilot_action(CONTROLLER_ACTION_ENGAGE)
-    controller_disengage_requested = self._consume_controller_openpilot_action(CONTROLLER_ACTION_DISENGAGE)
-
-    switchback_mode_enabled = self.params_memory.get_bool("SwitchbackModeEnabled")
+    # update_events runs at 100Hz; sample these memory params at 20Hz. The controller
+    # counters are compared to their last value, so a press is only delayed, never lost.
+    poll_params = self._param_poll_frame % PARAM_POLL_FRAMES == 0
+    self._param_poll_frame += 1
+    if poll_params:
+      controller_engage_requested = self._consume_controller_openpilot_action(CONTROLLER_ACTION_ENGAGE)
+      controller_disengage_requested = self._consume_controller_openpilot_action(CONTROLLER_ACTION_DISENGAGE)
+      self.switchback_mode_enabled = self.params_memory.get_bool("SwitchbackModeEnabled")
+    else:
+      controller_engage_requested = controller_disengage_requested = False
+    switchback_mode_enabled = self.switchback_mode_enabled
     switchback_mode_cooldown = max(0.0, float(getattr(self.starpilot_toggles, "switchback_mode_cooldown", 0.0)))
 
     if not self.sm['deviceState'].started:

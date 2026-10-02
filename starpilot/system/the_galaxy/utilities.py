@@ -2991,6 +2991,31 @@ def _dashboard_empty(is_metric, now, footage_paths, params_obj, persistent_stats
   }
 
 
+def refresh_dashboard_drives(footage_paths, params_obj=None, now=None):
+  """Persist newly finished drives and kick the background analyzer.
+
+  These are the only lasting effects of get_dashboard_stats(). Background callers
+  (starpilot_process, every minute offroad) discard the dashboard itself, so skip
+  building it: no storage scan, device summary subprocesses or deep copies.
+  """
+  params_obj = params_obj or params
+  now = now or datetime.now()
+  route_infos = _list_dashboard_routes(footage_paths)
+  is_metric = _params_get_bool(params_obj, "IsMetric")
+  model_names = _model_lookup(params_obj)
+
+  persistent_stats = _load_dashboard_persistent_stats(params_obj)
+  shell_drives = [
+    _route_shell_drive(route_info, params_obj, model_names, is_metric, now=now)
+    for route_info in route_infos
+  ]
+  if shell_drives:
+    persistent_stats = _update_dashboard_persistent_stats(params_obj, shell_drives, time.time())
+
+  pending_candidates = _analysis_candidates(route_infos, persistent_stats)
+  _start_dashboard_background_analysis(footage_paths, route_infos, persistent_stats, pending_candidates)
+
+
 def get_dashboard_stats(footage_paths, params_obj=None, now=None):
   params_obj = params_obj or params
   now = now or datetime.now()

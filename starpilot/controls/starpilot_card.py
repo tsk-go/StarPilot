@@ -44,6 +44,9 @@ def aol_blocked_by_immediate_disable(*alert_types) -> bool:
 
 
 class StarPilotCard:
+  # update() samples param-file state every Nth frame (100Hz / 5 = 20Hz).
+  PARAM_POLL_FRAMES = 5
+
   @staticmethod
   def _button_type_raw(button_event) -> int:
     button_type = getattr(button_event, "type", button_event)
@@ -103,6 +106,8 @@ class StarPilotCard:
     self.cancel_counter = 0
     self._distance_poll_counter = 0
     self._onroad_distance_pressed = False
+    self._param_poll_frame = 0
+    self._error_log_present = False
 
     self.always_on_lateral_set = (
       self.always_on_lateral_supported and
@@ -236,8 +241,16 @@ class StarPilotCard:
       self.params.put_bool_nonblocking("ExperimentalMode", not sm["selfdriveState"].experimentalMode)
 
   def update(self, carState, starpilotCarState, sm, starpilot_toggles, *, preap_authorized=False):
-    self.switchback_mode_enabled = self.params_memory.get_bool("SwitchbackModeEnabled")
-    self._handle_favorite_traffic_mode_action(sm)
+    # This runs at 100Hz. The values below come from param files written by the UI,
+    # wheel controls or other processes, and the action counters are compared against
+    # their last value, so sampling them at 20Hz misses nothing (a press is just seen
+    # up to 50ms later).
+    poll_params = self._param_poll_frame % self.PARAM_POLL_FRAMES == 0
+    self._param_poll_frame += 1
+    if poll_params:
+      self.switchback_mode_enabled = self.params_memory.get_bool("SwitchbackModeEnabled")
+      self._handle_favorite_traffic_mode_action(sm)
+      self._error_log_present = self.error_log.is_file()
 
     pulse_glide_cancel_override = (
       (bool(getattr(sm["carControl"], "longActive", False)) or self.pulse_and_glide) and
@@ -463,7 +476,8 @@ class StarPilotCard:
         else:
           self.handle_button_event("lkas", sm, starpilot_toggles)
 
-    self._handle_controller_actions(carState, sm, starpilot_toggles, main_cruise_aol)
+    if poll_params:
+      self._handle_controller_actions(carState, sm, starpilot_toggles, main_cruise_aol)
 
     self.always_on_lateral_enabled = self.always_on_lateral_allowed and self.always_on_lateral_set
     if getattr(self.CP, "carFingerprint", None) == "TESLA_MODEL_S_PREAP":
@@ -476,7 +490,7 @@ class StarPilotCard:
       sm["selfdriveState"].alertType, sm["starpilotSelfdriveState"].alertType,
     )
     self.always_on_lateral_enabled &= not (carState.brakePressed and carState.vEgo < starpilot_toggles.always_on_lateral_pause_speed) or carState.standstill
-    self.always_on_lateral_enabled &= not self.error_log.is_file()
+    self.always_on_lateral_enabled &= not self._error_log_present
 
     if getattr(starpilot_toggles, "has_canfd_media_buttons", False):
       if starpilotCarState.modePressed:

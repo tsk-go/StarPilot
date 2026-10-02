@@ -2668,3 +2668,48 @@ def test_toggle_profile_slots_save_and_load_the_same_filtered_settings(monkeypat
   server.params.values["IsOnroad"] = True
   onroad = client.post("/api/toggles/profiles/a/load")
   assert onroad.status_code == 403
+
+
+def test_background_refresh_persists_the_same_drives_as_full_dashboard(monkeypatch):
+  now = utilities.datetime.now().replace(hour=12, minute=0, second=0, microsecond=0)
+  week_start = utilities._start_of_week(now)
+  route_infos = [
+    {
+      "name": name,
+      "segments": [],
+      "segmentCount": count,
+      "startedAt": week_start + utilities.timedelta(days=day, hours=9),
+      "modifiedAt": (week_start + utilities.timedelta(days=day, hours=9, minutes=count)).timestamp(),
+    }
+    for name, count, day in (("route-new", 3, 1), ("route-old", 2, 0))
+  ]
+  base_params = {
+    "IsMetric": False,
+    "Model": "orion",
+    "AvailableModels": "orion",
+    "AvailableModelNames": "Orion",
+    "AvailableModelSeries": "City",
+  }
+  started = []
+  monkeypatch.setattr(utilities, "_list_dashboard_routes", lambda paths: route_infos)
+  monkeypatch.setattr(utilities, "_start_dashboard_background_analysis",
+                      lambda paths, infos, stats, candidates: started.append([route["name"] for route in candidates]))
+  empty_storage = {"freeBytes": 0, "usedBytes": 0, "totalBytes": 0, "usedPercent": 0, "segmentCounts": {}}
+  monkeypatch.setattr(utilities, "_build_storage_summary", lambda paths: empty_storage)
+  monkeypatch.setattr(utilities.time, "time", lambda: now.timestamp())
+
+  utilities._invalidate_dashboard_cache()
+  full_params = FakeParams(dict(base_params))
+  utilities.get_dashboard_stats(["/tmp/missing"], full_params, now=now)
+  utilities._invalidate_dashboard_cache()
+
+  # The background refresh must not build the dashboard view at all.
+  monkeypatch.setattr(utilities, "_build_storage_summary", lambda paths: pytest.fail("storage scanned"))
+  monkeypatch.setattr(utilities, "_build_device_summary", lambda params_obj: pytest.fail("device summary built"))
+  refresh_params = FakeParams(dict(base_params))
+  utilities.refresh_dashboard_drives(["/tmp/missing"], refresh_params, now=now)
+
+  persisted_key = utilities.DASHBOARD_PERSISTENT_STATS_PARAM
+  assert refresh_params.get(persisted_key) == full_params.get(persisted_key)
+  assert full_params.get(persisted_key)
+  assert started == [["route-new", "route-old"], ["route-new", "route-old"]]

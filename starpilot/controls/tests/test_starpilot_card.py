@@ -15,6 +15,13 @@ from openpilot.starpilot.common.favorite_slots import (
 from openpilot.starpilot.controls import starpilot_card as spc
 
 
+@pytest.fixture(autouse=True)
+def poll_params_every_frame(monkeypatch):
+  # These tests step button sequences frame by frame; sample params on every frame
+  # so they exercise the button logic rather than the 20Hz polling cadence.
+  monkeypatch.setattr(spc.StarPilotCard, "PARAM_POLL_FRAMES", 1)
+
+
 class FakeParams:
   def __init__(self, *args, **kwargs):
     self._store = {}
@@ -1631,3 +1638,32 @@ def test_favorite_traffic_mode_action_is_consumed_when_not_active(monkeypatch, t
 
   assert card.traffic_mode_enabled is False
   assert card._favorite_traffic_mode_counter == 1
+
+
+def test_controller_actions_are_sampled_at_20hz_without_losing_presses(monkeypatch, tmp_path):
+  monkeypatch.setattr(spc, "Params", FakeParams)
+  monkeypatch.setattr(spc, "ERROR_LOGS_PATH", tmp_path)
+  monkeypatch.setattr(spc.StarPilotCard, "PARAM_POLL_FRAMES", 5)
+
+  card = spc.StarPilotCard(SimpleNamespace(brand="honda"), SimpleNamespace(alternativeExperience=0))
+  toggles = make_toggles(always_on_lateral=True, lkas_allowed_for_aol=False)
+  counter = spc.CONTROLLER_ACTION_COUNTERS[spc.CONTROLLER_ACTION_TOGGLE_AOL]
+  reads = []
+  get_int = card.params_memory.get_int
+  monkeypatch.setattr(card.params_memory, "get_int", lambda key, *a, **k: reads.append(key) or get_int(key, *a, **k))
+
+  def step():
+    return card.update(make_car_state(), SimpleNamespace(distancePressed=False), make_sm(), toggles)
+
+  assert step().alwaysOnLateralAllowed is False  # frame 0 polls
+  card.params_memory.put_int(counter, 1)
+  for _ in range(4):  # frames 1-4 don't read params
+    assert step().alwaysOnLateralAllowed is False
+  assert step().alwaysOnLateralAllowed is True  # frame 5 picks up the press
+  assert reads.count(counter) == 2
+
+  # Two presses between samples are both counted (even count -> no net toggle).
+  card.params_memory.put_int(counter, 3)
+  for _ in range(5):
+    ret = step()
+  assert ret.alwaysOnLateralAllowed is True

@@ -41,6 +41,7 @@ REPLAY = "REPLAY" in os.environ
 OPENPILOT_LEAD_MIN_DISTANCE = 0.1
 REDNECK_DECREASE_LOOKAHEAD_POINTS = 10
 SLC_SOURCE_NONE = "None"
+PARAM_POLL_FRAMES = 5  # sample memory params every 5th 100Hz frame (20Hz)
 EventName = log.OnroadEvent.EventName
 
 
@@ -122,6 +123,9 @@ class Car:
     self._favorite_virtual_accel_counter = self.params_memory.get_int(FAVORITE_ACTION_ACCEL_COUNTER)
     self._favorite_virtual_decel_counter = self.params_memory.get_int(FAVORITE_ACTION_DECEL_COUNTER)
     self._favorite_virtual_releases = []
+    # step() runs at 100Hz; sample the UI/wheel-driven memory params at 20Hz.
+    # The favorite counters are compared to their last value, so nothing is missed.
+    self._param_poll_frame = 0
 
     self.can_callbacks = can_comm_callbacks(self.can_sock, self.pm.sock['sendcan'])
 
@@ -262,7 +266,7 @@ class Car:
     self.sm = self.sm.extend(starpilot_services)
     self.pm = self.pm.extend(['starpilotCarState'])
 
-  def _inject_favorite_virtual_cruise_events(self, CS: car.CarState) -> None:
+  def _inject_favorite_virtual_cruise_events(self, CS: car.CarState, poll_params: bool = True) -> None:
     virtual_events = [
       structs.CarState.ButtonEvent(pressed=False, type=button_type)
       for button_type in self._favorite_virtual_releases
@@ -273,6 +277,8 @@ class Car:
       (FAVORITE_ACTION_ACCEL_COUNTER, "_favorite_virtual_accel_counter", ButtonType.accelCruise),
       (FAVORITE_ACTION_DECEL_COUNTER, "_favorite_virtual_decel_counter", ButtonType.decelCruise),
     ):
+      if not poll_params:
+        break
       counter = self.params_memory.get_int(counter_key)
       if counter == getattr(self, counter_attr):
         continue
@@ -289,11 +295,14 @@ class Car:
     can_strs = messaging.drain_sock_raw(self.can_sock, wait_for_one=True)
     can_list = can_capnp_to_list(can_strs)
 
+    poll_params = self._param_poll_frame % PARAM_POLL_FRAMES == 0
+    self._param_poll_frame += 1
+
     # Update carState from CAN
     CS, FPCS = self.CI.update(can_list, self.starpilot_toggles)
     if self.CP.brand == 'mock':
       CS, FPCS = self.mock_carstate.update(CS, FPCS)
-    self._inject_favorite_virtual_cruise_events(CS)
+    self._inject_favorite_virtual_cruise_events(CS, poll_params)
 
     # Update radar tracks from CAN
     RD: structs.RadarDataT | None = self.RI.update(can_list)
@@ -333,7 +342,7 @@ class Car:
       self.v_cruise_helper.v_cruise_kph_last = self.v_cruise_helper.v_cruise_kph
       self.v_cruise_helper.v_cruise_kph = preap_v_cruise_kph
       self.v_cruise_helper.v_cruise_cluster_kph = preap_v_cruise_kph
-    slc_force_speed = self.params_memory.get_float("SLCForceCruiseSpeed")
+    slc_force_speed = self.params_memory.get_float("SLCForceCruiseSpeed") if poll_params else 0.0
     if slc_force_speed > 0:
       if self.is_metric:
         new_cruise_kph = round(slc_force_speed * CV.MS_TO_KPH)

@@ -198,7 +198,7 @@ def get_dashboard_footage_paths():
     ]
 
 def refresh_dashboard_analysis():
-  get_dashboard_utilities().get_dashboard_stats(get_dashboard_footage_paths())
+  get_dashboard_utilities().refresh_dashboard_drives(get_dashboard_footage_paths())
 
 def transition_offroad(starpilot_planner, model_manager, theme_manager, thread_manager, time_validated, sm, params, starpilot_toggles):
   if gps_position_valid(starpilot_planner.gps_position):

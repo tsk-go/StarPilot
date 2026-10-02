@@ -42,6 +42,7 @@ class MapSpeedLogger:
     self.cached_segments = {}
 
     self.dataset_additions = deque(maxlen=MAX_PENDING_ADDITIONS)
+    self._cleaned_dataset = None
     self.last_dataset_flush = time.monotonic()
 
     self.overpass_requests = self.get_json_param("OverpassRequests", {})
@@ -68,26 +69,35 @@ class MapSpeedLogger:
     return self.sm["deviceState"].started or not self.params_memory.get_bool("UpdateSpeedLimits")
 
   @staticmethod
-  def cleanup_dataset(dataset):
+  def _dataset_key(item):
+    if "last_vetted" in item:
+      required = {"incorrect_limit", "last_vetted", "segment_id", "source", "speed_limit", "start_coordinates"}
+    else:
+      required = {"bearing", "end_coordinates", "incorrect_limit", "road_name", "road_width", "source", "speed_limit", "start_coordinates"}
+
+    if not required.issubset(item.keys()):
+      return None
+
+    entry_copy = item.copy()
+    entry_copy.pop("last_vetted", None)
+    if "last_vetted" in item:
+      entry_copy = {key: entry_copy[key] for key in required if key != "last_vetted"}
+
+    return json.dumps(entry_copy, sort_keys=True)
+
+  @classmethod
+  def _add_to_cleaned(cls, cleaned_data, items):
+    for item in items:
+      key = cls._dataset_key(item)
+      if key is not None:
+        cleaned_data[key] = item
+    while len(cleaned_data) > MAX_ENTRIES:
+      cleaned_data.popitem(last=False)
+
+  @classmethod
+  def cleanup_dataset(cls, dataset):
     cleaned_data = OrderedDict()
-
-    for item in dataset:
-      if "last_vetted" in item:
-        required = {"incorrect_limit", "last_vetted", "segment_id", "source", "speed_limit", "start_coordinates"}
-      else:
-        required = {"bearing", "end_coordinates", "incorrect_limit", "road_name", "road_width", "source", "speed_limit", "start_coordinates"}
-
-      if not required.issubset(item.keys()):
-        continue
-
-      entry_copy = item.copy()
-      entry_copy.pop("last_vetted", None)
-      if "last_vetted" in item:
-        entry_copy = {key: entry_copy[key] for key in required if key != "last_vetted"}
-
-      key = json.dumps(entry_copy, sort_keys=True)
-      cleaned_data[key] = item
-
+    cls._add_to_cleaned(cleaned_data, dataset)
     return deque(cleaned_data.values(), maxlen=MAX_ENTRIES)
 
   @staticmethod
@@ -153,6 +163,7 @@ class MapSpeedLogger:
     if not self.dataset_additions:
       if force:
         self.last_dataset_flush = time.monotonic()
+        self._cleaned_dataset = None
       return
 
     now = time.monotonic()
@@ -162,14 +173,20 @@ class MapSpeedLogger:
     if not should_flush:
       return
 
-    existing_dataset = self.get_json_param("SpeedLimits", [])
-    existing_dataset.extend(self.dataset_additions)
-
-    new_dataset = self.cleanup_dataset(existing_dataset)
-    self.params.put("SpeedLimits", list(new_dataset))
+    # Only this logger writes SpeedLimits, so keep the cleaned dataset in memory between
+    # flushes while driving instead of re-reading and re-deduping the whole file (up to
+    # 1M entries) every minute. Same result as cleanup_dataset(existing + additions).
+    if self._cleaned_dataset is None:
+      self._cleaned_dataset = OrderedDict()
+      self._add_to_cleaned(self._cleaned_dataset, self.get_json_param("SpeedLimits", []))
+    self._add_to_cleaned(self._cleaned_dataset, self.dataset_additions)
+    self.params.put("SpeedLimits", list(self._cleaned_dataset.values()))
 
     self.dataset_additions.clear()
     self.last_dataset_flush = now
+    if force:
+      # Offroad processing rewrites SpeedLimits next; re-read it on the next drive.
+      self._cleaned_dataset = None
 
   def wait_for_api(self):
     while not is_url_pingable(OVERPASS_STATUS_URL):

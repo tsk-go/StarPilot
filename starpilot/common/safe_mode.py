@@ -16,7 +16,10 @@ from openpilot.starpilot.common.longitudinal_personality_profiles import (
 
 SAFE_MODE_PARAM = "SafeMode"
 SAFE_MODE_BACKUP_PARAM = "SafeModeBackup"
-SAFE_MODE_ENFORCE_FRAMES = 20
+# Periodic backstop only: every settings writer (UI, Galaxy, remote sync) sets
+# StarPilotTogglesUpdated, which enforces immediately. A pass reads ~200 params on
+# the 20Hz planner loop, so run the backstop every 5s instead of every second.
+SAFE_MODE_ENFORCE_FRAMES = 100
 
 # Driving-affecting settings that Safe Mode forces back to safe branch/stock behavior.
 SAFE_MODE_MANAGED_KEYS = (

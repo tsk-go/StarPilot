@@ -71,14 +71,14 @@ def check_toggles(started, params, sm=None, boot_run=False):
   if not _get_migrated_bool(params, GALAXY_PAIRED_PARAM, LEGACY_GALAXY_PAIRED_PARAM):
     return None
 
-  if not is_url_pingable(STARPILOT_API):
-    return None
-
   if not boot_run:
     if started and not sm["starpilotCarState"].isParked:
       return None
     if sm["deviceState"].screenBrightnessPercent == 0:
       return None
+
+  if not is_url_pingable(STARPILOT_API):
+    return None
 
   try:
     api_token, _, device_type, dongle_id = get_starpilot_api_info()
@@ -281,7 +281,7 @@ def galaxy_thread():
       latest_galaxy_active = check_toggles(started, params, sm)
       if latest_galaxy_active is not None:
         galaxy_active = latest_galaxy_active
-      next_toggle_check_at = now + REMOTE_TOGGLE_CHECK_INTERVAL_ACTIVE if galaxy_active else REMOTE_TOGGLE_CHECK_INTERVAL_IDLE
+      next_toggle_check_at = now + (REMOTE_TOGGLE_CHECK_INTERVAL_ACTIVE if galaxy_active else REMOTE_TOGGLE_CHECK_INTERVAL_IDLE)
 
     if _get_migrated_bool(params, GALAXY_UPLOAD_PENDING_PARAM, LEGACY_GALAXY_UPLOAD_PENDING_PARAM) and not maneuver_mode_active:
       if not _get_migrated_bool(params, GALAXY_PAIRED_PARAM, LEGACY_GALAXY_PAIRED_PARAM):

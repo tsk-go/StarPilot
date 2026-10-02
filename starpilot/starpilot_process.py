@@ -35,7 +35,6 @@ from openpilot.starpilot.common.safe_mode import (
 from openpilot.starpilot.common.starpilot_utilities import ThreadManager, flash_panda, is_url_pingable, lock_doors, use_konik_server
 from openpilot.starpilot.common.starpilot_variables import ERROR_LOGS_PATH, StarPilotVariables
 from openpilot.starpilot.controls.starpilot_planner import StarPilotPlanner, serialize_starpilot_toggles
-from openpilot.starpilot.system.starpilot_stats import send_stats
 from openpilot.starpilot.system.starpilot_tracking import StarPilotTracking
 
 ASSET_CHECK_RATE = (1 / DT_MDL)
@@ -47,6 +46,13 @@ TOGGLE_BROADCAST_INTERVAL_FRAMES = int(1 / DT_MDL)
 UPDATE_CHECK_INTERVAL_SECONDS = 60 * 60
 
 _DASHBOARD_UTILITIES = None
+
+
+def send_stats():
+  # starpilot_stats pulls in influxdb_client (slow import, ~15MB RSS). It only runs
+  # once per boot from a background thread, so defer the import until then.
+  from openpilot.starpilot.system.starpilot_stats import send_stats as _send_stats
+  _send_stats()
 
 
 def get_update_check_phase_seconds(params_raw):

@@ -196,6 +196,13 @@ def get_current_lan_ip():
   except Exception:
     pass
 
+  # The socket candidate wins whenever it's valid, so skip spawning `ip`/`hostname`.
+  ip = _format_lan_ip(candidates[0]) if candidates else None
+  if ip:
+    _LAN_IP_CACHE["updated_at"] = time.monotonic()
+    _LAN_IP_CACHE["value"] = ip
+    return ip
+
   candidates.extend(_candidate_lan_ips_from_ip_addr())
 
   try:

@@ -55,7 +55,9 @@ class MapSpeedLogger:
 
     self.gps_location_service = get_gps_location_service(self.params)
 
-    self.sm = messaging.SubMaster(["deviceState", "starpilotCarState", "starpilotPlan", self.gps_location_service, "mapdOut", "modelV2"])
+    # Only GPS updates produce work, so don't wake up for every 100Hz carState message.
+    self.sm = messaging.SubMaster(["deviceState", "starpilotCarState", "starpilotPlan", self.gps_location_service, "mapdOut", "modelV2"],
+                                  poll=self.gps_location_service)
 
   @property
   def can_make_overpass_request(self):
@@ -172,7 +174,7 @@ class MapSpeedLogger:
   def wait_for_api(self):
     while not is_url_pingable(OVERPASS_STATUS_URL):
       print("Waiting for Overpass API to be available...")
-      self.sm.update()
+      self.sm.update(0)
 
       if self.should_stop_processing:
         return False
@@ -311,7 +313,7 @@ class MapSpeedLogger:
     total_entries = len(entries_to_process)
 
     for i, entry in enumerate(entries_to_process):
-      self.sm.update()
+      self.sm.update(0)
 
       if self.should_stop_processing:
         break
@@ -399,7 +401,7 @@ class MapSpeedLogger:
     vetted_entries = deque(maxlen=MAX_ENTRIES)
 
     for i, entry in enumerate(dataset_list):
-      self.sm.update()
+      self.sm.update(0)
 
       if self.should_stop_processing:
         vetted_entries.extend(dataset_list[i:])

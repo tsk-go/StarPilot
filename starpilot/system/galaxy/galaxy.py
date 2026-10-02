@@ -23,6 +23,7 @@ else:
   GALAXY_DIR = Path("/data/galaxy")
 FRPC_VERSION = "0.67.0"
 FRPC_LOG = GALAXY_DIR / "frpc.log"
+FRPC_LOG_MAX_BYTES = 5 * 1024 * 1024
 AUTH_PORT = 8083
 GALAXY_WEB_HOST = "127.0.0.1"
 GALAXY_WEB_PORT = 8082
@@ -266,12 +267,19 @@ customDomains = ["auth-{slug}.devices.local"]
         frpc_toml.write_text(config)
 
         print(f"Galaxy: Starting frpc tunnel (slug: {slug[:4]}...)...")
-        log_file = open(FRPC_LOG, 'a')
-        process = subprocess.Popen(
-          [str(GALAXY_DIR / "frpc"), "-c", str(frpc_toml)],
-          stdout=log_file,
-          stderr=log_file
-        )
+        # frpc logs every reconnect attempt while offline; don't let the log grow without bound.
+        try:
+          if FRPC_LOG.stat().st_size > FRPC_LOG_MAX_BYTES:
+            FRPC_LOG.unlink()
+        except OSError:
+          pass
+        # The child keeps its own copy of the descriptor; close ours so restarts don't leak fds.
+        with open(FRPC_LOG, 'a') as log_file:
+          process = subprocess.Popen(
+            [str(GALAXY_DIR / "frpc"), "-c", str(frpc_toml)],
+            stdout=log_file,
+            stderr=log_file
+          )
         last_slug = slug
     else:
       if process is not None and process.poll() is None:

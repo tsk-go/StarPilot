@@ -510,6 +510,8 @@ class WheelControlsDaemon:
     self.learning_deadline = 0.0
     self.last_learned: dict[str, Any] | None = None
     self.testing = False
+    self._onroad_learning_cancelled = False
+    self._onroad_testing_stopped = False
     self.last_tested: dict[str, Any] | None = None
     self.last_scan = 0.0
     self.last_status = 0.0
@@ -559,9 +561,14 @@ class WheelControlsDaemon:
 
   def _update_learning(self, now: float) -> None:
     if not self.params.get_bool("IsOffroad"):
-      cancel_learning(self.params_memory, self.params)
+      # cancel_learning removes a param and re-parses the saved mappings, so only run it
+      # once per drive (or if learning gets requested while onroad), not every 100ms.
+      if not self._onroad_learning_cancelled or self.learning_slot is not None or self.params_memory.get_int(LEARN_SLOT_PARAM):
+        cancel_learning(self.params_memory, self.params)
+        self._onroad_learning_cancelled = True
       self.learning_slot = None
       return
+    self._onroad_learning_cancelled = False
 
     requested = self.params_memory.get_int(LEARN_SLOT_PARAM)
     if 1 <= requested <= MAPPING_SLOT_COUNT:
@@ -579,9 +586,12 @@ class WheelControlsDaemon:
   def _update_testing(self) -> None:
     requested = self.params_memory.get_bool(TEST_ACTIVE_PARAM)
     if not self.params.get_bool("IsOffroad"):
-      stop_testing(self.params_memory)
+      if not self._onroad_testing_stopped or requested:
+        stop_testing(self.params_memory)
+        self._onroad_testing_stopped = True
       self.testing = False
       return
+    self._onroad_testing_stopped = False
     if requested and not self.testing:
       self.testing = True
       self.last_tested = None

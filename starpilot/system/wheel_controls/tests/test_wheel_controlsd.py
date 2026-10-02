@@ -471,3 +471,44 @@ def test_button_test_mode_stops_onroad():
   assert not daemon.testing
   assert not memory.get_bool(wheel_controlsd.TEST_ACTIVE_PARAM)
   daemon.close()
+
+
+def test_onroad_cleanup_runs_once_per_drive_not_every_poll():
+  class CountingMemory(FakeParams):
+    def __init__(self):
+      super().__init__()
+      self.removes = []
+
+    def remove(self, key):
+      self.removes.append(key)
+      super().remove(key)
+
+  params = FakeParams({"IsOffroad": False})
+  memory = CountingMemory()
+  daemon = wheel_controlsd.WheelControlsDaemon(params, memory)
+  try:
+    for frame in range(20):
+      daemon._update_learning(frame / 10)
+      daemon._update_testing()
+    assert memory.removes.count(wheel_controlsd.LEARN_SLOT_PARAM) == 1
+    assert memory.removes.count(wheel_controlsd.TEST_ACTIVE_PARAM) == 1
+
+    # A request that shows up mid-drive is still cancelled right away.
+    memory.put_int(wheel_controlsd.LEARN_SLOT_PARAM, 1)
+    memory.put_bool(wheel_controlsd.TEST_ACTIVE_PARAM, True)
+    daemon._update_learning(5.0)
+    daemon._update_testing()
+    assert memory.get_int(wheel_controlsd.LEARN_SLOT_PARAM) == 0
+    assert not memory.get_bool(wheel_controlsd.TEST_ACTIVE_PARAM)
+
+    # Next drive cleans up again.
+    params.values["IsOffroad"] = True
+    daemon._update_learning(6.0)
+    daemon._update_testing()
+    params.values["IsOffroad"] = False
+    removes_before = len(memory.removes)
+    daemon._update_learning(7.0)
+    daemon._update_testing()
+    assert len(memory.removes) == removes_before + 2
+  finally:
+    daemon.close()

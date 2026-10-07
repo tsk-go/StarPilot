@@ -55,7 +55,7 @@ def test_screen_off_while_tablet_connected_and_back_when_it_leaves(tmp_path):
   dev._update_wakefulness()  # normal wake logic must not turn the screen on while active
   assert not dev._awake and dev.wake_calls == 0
 
-  old = time.time() - 10
+  old = time.time() - 10  # noqa: TID251 file mtimes are wall-clock time
   os.utime(flag, (old, old))  # tablet stopped refreshing the flag
   mode.update(11.0)
   assert not mode.active and dev._awake

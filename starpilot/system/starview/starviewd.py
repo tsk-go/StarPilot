@@ -12,8 +12,9 @@ Endpoints (default port 8090, env STARVIEW_PORT):
   WS   /data             text hello (JSON) then binary frames:  u8 name_len | name | raw capnp log.Event
                          client may send text JSON: {"subscribe": {"carState": 20, "modelV2": 0}}  (Hz, 0 = native)
                                                     {"ping": <any>}  -> {"pong": <any>, "t_ns": <device monotonic ns>}
-  WS   /term             bash in a pty, persistent per ?sid= (USB peers, or private Wi-Fi peers with the /termkey key)
-  GET  /termkey          the shell/file key (USB peers only)
+  WS   /term             bash in a pty, persistent per ?sid=
+  GET  /hello?n=<nonce>  pairing step 1: proof that this comma holds the tablet's pairing key (see pairing.py)
+  POST /auth             pairing step 2: the tablet's proof -> a session pass for every other endpoint
   HTTP /fs/*             file browser API for the tablet's Files screen (same guard) -- see the files section
   WS   /video/{road|wide|driver}
                          binary frames: 28-byte header | H.264 Annex-B (SPS/PPS prepended on keyframes)
@@ -1260,11 +1261,11 @@ async def ws_video(request):
 
 
 # ------------------------------------------------------------------------------------------ access
-# Every endpoint except UDP discovery and /regulatory needs one of: this device itself, a tablet on the USB tether
-# (until "usb needs key" is switched on in the comma's StarView settings), or a tablet paired by scanning the QR code
-# there, which sends the key with every request (header X-StarView-Key, or ?key= from the terminal WebView).
-# Keys are only accepted from private / link-local addresses. Ethernet links are not trusted like the tether.
-# STARVIEW_TERM_ANY=1 (debug only) accepts any peer without a key.
+# Every endpoint except UDP discovery, /regulatory, /hello and /auth needs one of: this device itself, a tablet on the
+# USB tether (until "usb needs key" is switched on in the comma's StarView settings), or a tablet paired by scanning
+# the QR code there. A paired tablet never sends the key: it gets a session pass from /hello + /auth (pairing.py) and
+# sends that (header X-StarView-Session, or ?s= from the terminal WebView). Only from private / link-local addresses.
+# Ethernet links are not trusted like the tether. STARVIEW_TERM_ANY=1 (debug only) accepts any peer.
 TERM_ANY = os.getenv("STARVIEW_TERM_ANY", "0") == "1"
 
 
@@ -1272,20 +1273,12 @@ def _usb_subnets():
   return pairing.usb_subnets()
 
 
-def term_key() -> str:
-  return pairing.get_key()
-
-
-def _usb_peer(remote: str) -> bool:
-  return pairing.is_usb_peer(remote)
-
-
-def _request_key(request) -> str:
-  return request.headers.get(pairing.KEY_HEADER, "") or request.query.get("key", "")
+def _request_session(request) -> str:
+  return request.headers.get(pairing.SESSION_HEADER, "") or request.query.get(pairing.SESSION_QUERY, "")
 
 
 def term_allowed(request) -> bool:
-  return TERM_ANY or pairing.is_authorized(request.remote or "", _request_key(request))
+  return TERM_ANY or pairing.is_authorized(request.remote or "", _request_session(request))
 
 
 def require_paired(request):
@@ -1295,12 +1288,36 @@ def require_paired(request):
                                content_type="application/json")
 
 
-async def http_termkey(request):
-  # Older app versions fetch the key over the cable. Only while the cable is trusted: once "usb needs key" is on,
-  # pairing goes through the QR code only.
-  if pairing.usb_requires_key() or not _usb_peer(request.remote or ""):
-    raise web.HTTPForbidden(text="pair by scanning the StarView QR code in the comma's settings")
-  return web.json_response({"key": term_key()})
+def _require_local(request) -> str:
+  remote = request.remote or ""
+  if not pairing.is_local_peer(remote):
+    raise web.HTTPForbidden(text="StarView pairing works on the comma's own networks only")
+  return remote
+
+
+async def http_hello(request):
+  remote = _require_local(request)
+  r = pairing.challenge(remote, request.app["hub"].ops.dongle_id(), request.query.get("n"))
+  if r is None:
+    raise web.HTTPBadRequest(text="n: 32-128 lowercase hex characters")
+  return web.json_response(r)
+
+
+async def http_auth(request):
+  remote = _require_local(request)
+  try:
+    j = await request.json()
+  except Exception:
+    raise web.HTTPBadRequest(text="JSON body expected") from None
+  if not isinstance(j, dict):
+    raise web.HTTPBadRequest(text="JSON object expected")
+  token = pairing.open_session(remote, request.app["hub"].ops.dongle_id(), j.get("sn"), j.get("cn"), j.get("proof"))
+  if token is None:
+    cloudlog.warning(f"starview: pairing proof refused from {remote}")
+    raise web.HTTPUnauthorized(text=json.dumps({"error": "pairing required",
+                                                "hint": "scan the StarView QR code in the comma's settings"}),
+                               content_type="application/json")
+  return web.json_response({"session": token, "expires_s": int(pairing.SESSION_TTL_S)})
 
 
 # ------------------------------------------------------------------------------------------ terminal
@@ -1774,11 +1791,16 @@ def discovery_thread(hub: Hub):
       if not data.startswith(DISCOVERY_MAGIC):
         continue
       h = hello(hub)
-      reply = json.dumps({"type": "starview", "port": PORT, "dongleId": h.get("dongleId", ""),
-                          "branch": h.get("branch", ""), "commit": h.get("commit", ""),
-                          "live_streaming": hub.live, "unix_ns": time.time_ns(),
-                          # USB tether peers are trusted until "usb needs key" is on; everyone else must scan the QR
-                          "pairing_required": pairing.usb_requires_key() or not pairing.is_usb_peer(addr[0])}).encode()
+      reply = {"type": "starview", "port": PORT, "dongleId": h.get("dongleId", ""),
+               "branch": h.get("branch", ""), "commit": h.get("commit", ""),
+               "live_streaming": hub.live, "unix_ns": time.time_ns(),
+               # USB tether peers are trusted until "usb needs key" is on; everyone else must scan the QR
+               "pairing_required": pairing.usb_requires_key() or not pairing.is_usb_peer(addr[0])}
+      # "STARVIEW? <nonce>": prove we hold the pairing key, so a paired tablet can ignore impostors
+      cn = data[len(DISCOVERY_MAGIC):].strip().decode("ascii", "replace")
+      if pairing.valid_nonce(cn):
+        reply["proof"] = pairing.server_proof(reply["dongleId"], cn)
+      reply = json.dumps(reply).encode()
       s.sendto(reply, addr)
     except Exception as e:
       cloudlog.warning(f"starview: discovery: {e}")
@@ -1960,7 +1982,8 @@ def main():
     web.get("/storage", http_storage),
     web.get("/regulatory", http_regulatory),
     web.get("/term", ws_term),
-    web.get("/termkey", http_termkey),
+    web.get("/hello", http_hello),
+    web.post("/auth", http_auth),
     web.get("/fs/list", fs_list),
     web.get("/fs/walk", fs_walk),
     web.get("/fs/get", fs_get),

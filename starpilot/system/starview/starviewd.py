@@ -592,6 +592,10 @@ class Hub:
     self._flag_t = 0.0
     self.engaged = False
     self.started = False
+    # StarView runs as its own service (service.py) and outlives openpilot: deviceState (2 Hz) tells whether it's up
+    self.openpilot_down = False
+    self._ds_sock = None
+    self._ds_t = time.monotonic()
     self._info = {}
     self._info_t = 0.0
     self._car_state_sock = None
@@ -661,6 +665,8 @@ class Hub:
       cloudlog.info(f"starview: IsLiveStreaming={want_live}")
 
   def _onroad(self):
+    if self.openpilot_down:  # IsOnroad keeps whatever openpilot last wrote when it was stopped
+      return False
     try:
       return self.params.get("IsOnroad") in (b"1", "1", True, 1)
     except Exception:
@@ -712,6 +718,33 @@ class Hub:
     else:
       if self.enc_stall_s >= 10.0: cloudlog.warning("starview: video encoder output back")
       self._stall_since = None; self.enc_stall_s = 0.0
+
+  OPENPILOT_DOWN_S = 5.0
+
+  def openpilot_tick(self):
+    """Notice openpilot being stopped (`sudo systemctl stop comma`) or started again; StarView keeps running either way.
+    Stopped: forget the car state it left behind, so reboot works and the comma screen isn't held dark. Started again:
+    the manager clears IsLiveStreaming on start, so ask for the live video again if a tablet is watching."""
+    if self._ds_sock is None:
+      self._ds_sock = messaging.sub_sock("deviceState", conflate=True)
+    now = time.monotonic()
+    try:
+      if self._ds_sock.receive(non_blocking=True) is not None:
+        self._ds_t = now
+    except Exception:
+      pass
+    down = now - self._ds_t > self.OPENPILOT_DOWN_S
+    if down != self.openpilot_down:
+      self.openpilot_down = down
+      cloudlog.info(f"starview: openpilot {'stopped' if down else 'running again'}")
+      if down:
+        self.started = False
+        self.engaged = False
+      self.invalidate_params_snapshot()
+    if not down and self.live and not self.params.get_bool("IsLiveStreaming"):
+      cloudlog.info("starview: openpilot restarted - asking for the live stream again")
+      self.live = False
+      self.recompute_wanted()
 
   def drive_hold_tick(self):
     """Warm start: with the tablet attached, switch the video encoder on as the car turns on (still parked) and keep it
@@ -930,7 +963,8 @@ class Hub:
         self._info = self.ops.info()
       except Exception as e:
         cloudlog.warning(f"starview: info: {e}")
-    out["i"] = dict(self._info, engaged=self.engaged, onroad=self.started, encStall=round(self.enc_stall_s))
+    out["i"] = dict(self._info, engaged=self.engaged, onroad=self.started, encStall=round(self.enc_stall_s),
+                    openpilot=not self.openpilot_down)
     return out
 
   def control(self, req: dict) -> dict:
@@ -1002,7 +1036,11 @@ class Hub:
       if act == "power_off":
         if self.engaged:
           return {"ok": False, "error": "Disengage to Power Off"}
-        self.params.put_bool_nonblocking("DoShutdown", True)
+        if self.openpilot_down:  # the manager reads DoShutdown; with openpilot stopped nobody would
+          from openpilot.system.hardware import HARDWARE
+          threading.Timer(1.0, HARDWARE.shutdown).start()
+        else:
+          self.params.put_bool_nonblocking("DoShutdown", True)
         return {"ok": True, "shutdown": True}
       if act == "galaxy_pair":
         r = self.ops.galaxy_pair(req.get("password", ""))
@@ -1935,6 +1973,10 @@ def tablet_flag_thread(hub):
       hub.tablet_flag_tick(time.monotonic())
     except Exception as e:
       cloudlog.warning(f"starview: tablet flag: {e}")
+    try:
+      hub.openpilot_tick()
+    except Exception as e:
+      cloudlog.warning(f"starview: openpilot check: {e}")
     try:
       hub.video_health_tick()
     except Exception as e:

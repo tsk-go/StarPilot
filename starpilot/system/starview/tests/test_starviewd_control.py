@@ -46,7 +46,19 @@ def make_hub(onroad=False, started=False, engaged=False):
   hub._info = {}
   hub._info_t = 0.0
   hub.enc_stall_s = 0.0
+  hub.openpilot_down = False
+  hub._ds_sock = FakeSock()
+  hub._ds_t = 0.0
+  hub.live = False
   return hub
+
+
+class FakeSock:
+  def __init__(self):
+    self.pending = []
+
+  def receive(self, non_blocking=False):
+    return self.pending.pop(0) if self.pending else None
 
 
 @pytest.fixture
@@ -119,3 +131,60 @@ def test_params_snapshot_is_shared_between_tablets(monkeypatch):
   third = hub.params_snapshot()
   assert hub.params.reads > reads
   assert third is not first
+
+
+@pytest.fixture
+def clock(monkeypatch):
+  now = [1000.0]
+  monkeypatch.setattr(starviewd.time, "monotonic", lambda: now[0])
+  return now
+
+
+def test_openpilot_stopped_forgets_the_car_state_it_left(reboots, clock):
+  # openpilot stopped while the car was on (e.g. `sudo systemctl stop comma` for a CAN scan): IsOnroad stays "1"
+  hub = make_hub(onroad=True, started=True, engaged=True)
+  hub._ds_t = clock[0]
+  hub.openpilot_tick()
+  assert not hub.openpilot_down
+  assert hub.control({"action": "reboot"})["ok"] is False
+
+  clock[0] += hub.OPENPILOT_DOWN_S + 1  # no deviceState any more
+  hub.openpilot_tick()
+  assert hub.openpilot_down
+  assert (hub.started, hub.engaged, hub._onroad()) == (False, False, False)
+  assert hub.control({"action": "reboot"})["ok"] is True
+
+  hub._ds_sock.pending.append(b"deviceState")  # openpilot is back
+  hub.openpilot_tick()
+  assert not hub.openpilot_down
+  assert hub._onroad()
+
+
+def test_power_off_works_while_openpilot_is_stopped(reboots, clock):
+  hub = make_hub()
+  hub.openpilot_down = True
+  assert hub.control({"action": "power_off"})["ok"] is True
+  assert len(reboots) == 1  # direct shutdown timer: the manager isn't there to read DoShutdown
+  assert "DoShutdown" not in hub.params.values
+
+
+def test_power_off_goes_through_openpilot_while_it_runs(reboots):
+  hub = make_hub()
+  hub.control({"action": "power_off"})
+  assert hub.params.values["DoShutdown"] is True
+  assert reboots == []
+
+
+def test_live_video_is_asked_for_again_after_openpilot_restarts(monkeypatch, clock):
+  hub = make_hub(onroad=True, started=True)
+  hub._ds_t = clock[0]
+  hub.live = True  # a tablet is watching; openpilot just restarted and cleared IsLiveStreaming
+  asked = []
+  monkeypatch.setattr(hub, "recompute_wanted", lambda: asked.append(hub.live))
+  hub.openpilot_tick()
+  assert asked == [False]  # recompute runs with live reset, so it writes IsLiveStreaming again
+
+  hub.params.values["IsLiveStreaming"] = True
+  asked.clear()
+  hub.openpilot_tick()
+  assert asked == []

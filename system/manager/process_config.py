@@ -233,7 +233,9 @@ procs += [
   PythonProcess("wheel_controlsd", "starpilot.system.wheel_controls.wheel_controlsd", wheel_controls_enabled, enabled=TICI, nice=19),
   PythonProcess("the_galaxy", "starpilot.system.the_galaxy.the_galaxy", always_run, nice=10),
   PythonProcess("galaxy", "starpilot.system.galaxy.galaxy", always_run, nice=10),
-  PythonProcess("starviewd", "starpilot.system.starview.starviewd", always_run, nice=5),
+  # StarView runs as its own system service (starview.service), so the tablet, its terminal and file copying keep
+  # working while openpilot is stopped; this only starts and watches it (service.py).
+  PythonProcess("starviewd", "starpilot.system.starview.service", always_run, nice=5),
 ]
 
 device_type = HARDWARE.get_device_type()

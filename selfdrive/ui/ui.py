@@ -7,7 +7,8 @@ from openpilot.common.realtime import Priority, config_realtime_process, set_cor
 from openpilot.common.watchdog import kick_watchdog
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.selfdrive.ui.stall_monitor import UIStallMonitor
-from openpilot.selfdrive.ui.ui_state import ui_state
+from openpilot.selfdrive.ui.starview_tablet_mode import StarViewTabletMode
+from openpilot.selfdrive.ui.ui_state import device, ui_state
 
 BIG_UI = gui_app.big_ui()
 
@@ -69,6 +70,7 @@ def main():
     kick_watchdog()
     stall_monitor.progress("ui.loop_ready")
     context_update_time = 0.0
+    tablet_mode = StarViewTabletMode(gui_app, device, ui_state)
 
     for should_render in gui_app.render():
       stall_monitor.progress("ui.loop_iteration")
@@ -80,6 +82,7 @@ def main():
       if now - context_update_time >= 1.0:
         stall_monitor.set_context(_stall_context())
         context_update_time = now
+      tablet_mode.update(now)
       if should_render:
         # reaffine after power save offlines our core
         if TICI and os.sched_getaffinity(0) != cores:

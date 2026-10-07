@@ -12,6 +12,7 @@ import ipaddress
 import os
 import secrets
 import subprocess
+import time
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -87,8 +88,19 @@ def _ipv4_addrs() -> list[tuple[str, str, str]]:
   return out
 
 
+_usb_subnets_cache: tuple[float, list] = (float("-inf"), [])
+USB_SUBNETS_TTL_S = 5.0
+
+
 def usb_subnets() -> list:
-  return [ipaddress.ip_network(cidr, strict=False) for iface, _, cidr in _ipv4_addrs() if iface.startswith(USB_IFACE_PREFIXES)]
+  """Subnets of the USB tether links. Checked on every request and discovery reply, so `ip addr` runs at most every 5 s."""
+  global _usb_subnets_cache
+  now = time.monotonic()
+  checked_at, nets = _usb_subnets_cache
+  if now - checked_at >= USB_SUBNETS_TTL_S:
+    nets = [ipaddress.ip_network(cidr, strict=False) for iface, _, cidr in _ipv4_addrs() if iface.startswith(USB_IFACE_PREFIXES)]
+    _usb_subnets_cache = (now, nets)
+  return nets
 
 
 def is_usb_peer(remote: str, subnets=None) -> bool:

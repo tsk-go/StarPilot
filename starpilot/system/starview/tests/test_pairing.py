@@ -13,6 +13,7 @@ def starview_dir(tmp_path, monkeypatch):
   monkeypatch.setattr(pairing, "STARVIEW_DIR", tmp_path)
   monkeypatch.setattr(pairing, "KEY_FILE", tmp_path / "termkey")
   monkeypatch.setattr(pairing, "REQUIRE_KEY_ON_USB_FLAG", tmp_path / "require_pairing")
+  monkeypatch.setattr(pairing, "_usb_subnets_cache", (float("-inf"), []))
   return tmp_path
 
 
@@ -65,6 +66,14 @@ def test_ethernet_is_not_trusted_like_the_tether(monkeypatch):
   monkeypatch.setattr(pairing, "_ipv4_addrs", lambda: [("eth0", "10.0.0.2", "10.0.0.2/24"), ("usb0", "192.168.42.129", "192.168.42.129/24")])
   assert not pairing.is_usb_peer("10.0.0.7")
   assert pairing.is_usb_peer("192.168.42.10")
+
+
+def test_usb_subnets_are_cached(monkeypatch):
+  calls = []
+  monkeypatch.setattr(pairing, "_ipv4_addrs", lambda: calls.append(1) or [("usb0", "192.168.42.129", "192.168.42.129/24")])
+  for _ in range(10):
+    assert pairing.is_usb_peer("192.168.42.10")
+  assert len(calls) == 1
 
 
 def test_pairing_uri_lists_usb_first(monkeypatch):

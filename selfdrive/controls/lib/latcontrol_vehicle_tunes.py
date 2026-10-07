@@ -275,6 +275,8 @@ GENESIS_GV70_OUTPUT_SMOOTHING_UNWIND_PHASE = 0.04
 GENESIS_GV70_OUTPUT_SMOOTHING_UNWIND_PHASE_WIDTH = 0.08
 GENESIS_GV70_OUTPUT_SMOOTHING_DIRECTION_CHANGE_LAT = 0.55
 GENESIS_GV70_OUTPUT_SMOOTHING_DIRECTION_CHANGE_RC = 0.065
+GENESIS_GV70_MEASUREMENT_DAMPING_SPEED_BP = [10.0 * CV.MPH_TO_MS, 35.0 * CV.MPH_TO_MS, 60.0 * CV.MPH_TO_MS]
+GENESIS_GV70_MEASUREMENT_DAMPING_V = [0.0, 0.08, 0.12]
 GENESIS_GV70_HIGHWAY_STABILIZER_SPEED_BP = [40.0 * CV.MPH_TO_MS, 50.0 * CV.MPH_TO_MS]
 GENESIS_GV70_HIGHWAY_STABILIZER_CENTER_LAT_BP = [0.75, 1.0]
 GENESIS_GV70_HIGHWAY_STABILIZER_BASELINE_RC = 0.85
@@ -364,6 +366,10 @@ GENESIS_G70_OUTPUT_SMOOTHING_CENTER_RC = 0.18
 GENESIS_G70_OUTPUT_SMOOTHING_CURVE_RC = 0.10
 GENESIS_G70_OUTPUT_SMOOTHING_RELEASE_RC = 0.03
 GENESIS_G70_OUTPUT_SMOOTHING_OVERSHOOT = 0.08
+GENESIS_G70_CENTER_MEASUREMENT_DAMPING_MAX = 0.09
+GENESIS_G70_CENTER_MEASUREMENT_DAMPING_SPEED_BP = [50.0 * CV.MPH_TO_MS, 60.0 * CV.MPH_TO_MS]
+GENESIS_G70_CENTER_MEASUREMENT_DAMPING_LAT_BP = [0.15, 0.35]
+GENESIS_G70_CENTER_MEASUREMENT_DAMPING_JERK_BP = [0.20, 0.50]
 GENESIS_G70_HIGHWAY_STABILIZER_CENTER_LAT_BP = [1.4, 1.8]
 GENESIS_G70_HIGHWAY_STABILIZER_CURVE_EXIT_LAT = 0.15
 GENESIS_G70_ANGLE_OUTPUT_TAPER_MIN = 0.45
@@ -1261,6 +1267,9 @@ HONDA_CRV_5G_PID_CENTER_ANGLE = 14.0
 HONDA_CRV_5G_PID_CENTER_ANGLE_WIDTH = 3.0
 HONDA_CRV_5G_PID_OUTPUT_SCALE_MIN = 0.62
 HONDA_CRV_5G_PID_OUTPUT_ALPHA_MIN = 0.28
+HONDA_CRV_5G_PID_CENTER_KP_SCALE_MIN = 0.50
+HONDA_CRV_5G_PID_CENTER_KP_SPEED_BP = [11.0 * CV.MPH_TO_MS, 18.0 * CV.MPH_TO_MS]
+HONDA_CRV_5G_PID_CENTER_KP_ANGLE_BP = [6.0, 18.0]
 
 RAV4_TSS2_CENTER_FRICTION_THRESHOLD_GAIN = 0.14
 RAV4_TSS2_CENTER_FRICTION_LAT = 0.30
@@ -1327,6 +1336,11 @@ KONA_EV_2022_CENTER_FRICTION_THRESHOLD_LAT = 0.20
 KONA_EV_2022_CENTER_FRICTION_THRESHOLD_LAT_WIDTH = 0.05
 KONA_EV_2022_CENTER_FRICTION_THRESHOLD_SPEED = 18.0
 KONA_EV_2022_CENTER_FRICTION_THRESHOLD_SPEED_WIDTH = 2.5
+KONA_EV_2022_HIGH_SPEED_FRICTION_THRESHOLD_GAIN = 0.30
+KONA_EV_2022_HIGH_SPEED_FRICTION_THRESHOLD_SPEED_ONSET = 100.0 / 3.6
+KONA_EV_2022_HIGH_SPEED_FRICTION_THRESHOLD_SPEED_FULL = 120.0 / 3.6
+KONA_EV_2022_HIGH_SPEED_FRICTION_THRESHOLD_LAT_FADE_START = 0.80
+KONA_EV_2022_HIGH_SPEED_FRICTION_THRESHOLD_LAT_FADE_END = 1.50
 KONA_EV_2022_CENTER_OUTPUT_TAPER_MAX = 0.08
 KONA_EV_2022_CENTER_OUTPUT_TAPER_LAT = 0.20
 KONA_EV_2022_CENTER_OUTPUT_TAPER_LAT_WIDTH = 0.05
@@ -1905,6 +1919,12 @@ def get_rav4_tss2_pid_output(output_torque: float, prev_output_torque: float,
   return float(prev_output_torque + output_alpha * (limited_output - prev_output_torque))
 
 
+def get_honda_crv_5g_pid_kp_scale(desired_angle_deg: float, v_ego: float) -> float:
+  speed_weight = np.interp(max(v_ego, 0.0), HONDA_CRV_5G_PID_CENTER_KP_SPEED_BP, [1.0, 0.0])
+  center_weight = np.interp(abs(desired_angle_deg), HONDA_CRV_5G_PID_CENTER_KP_ANGLE_BP, [1.0, 0.0])
+  return float(1.0 - (1.0 - HONDA_CRV_5G_PID_CENTER_KP_SCALE_MIN) * speed_weight * center_weight)
+
+
 def get_honda_crv_5g_pid_output(output_torque: float, prev_output_torque: float,
                                 desired_angle_deg: float, v_ego: float) -> float:
   """Damp low-speed CR-V 5G center reversals without blunting real turns."""
@@ -2046,9 +2066,20 @@ def _kona_ev_2022_center_weights(desired_lateral_accel: float, v_ego: float) -> 
 
 def get_kona_ev_2022_friction_threshold(v_ego: float, desired_lateral_accel: float = 0.0) -> float:
   speed_weight, center_weight = _kona_ev_2022_center_weights(desired_lateral_accel, v_ego)
-  return get_standard_friction_threshold(v_ego) * (
+  base_threshold = get_standard_friction_threshold(v_ego) * (
     1.0 + KONA_EV_2022_CENTER_FRICTION_THRESHOLD_GAIN * speed_weight * center_weight
   )
+  high_speed_weight = float(np.interp(
+    v_ego,
+    [KONA_EV_2022_HIGH_SPEED_FRICTION_THRESHOLD_SPEED_ONSET, KONA_EV_2022_HIGH_SPEED_FRICTION_THRESHOLD_SPEED_FULL],
+    [0.0, 1.0],
+  ))
+  curve_weight = float(np.interp(
+    abs(desired_lateral_accel),
+    [KONA_EV_2022_HIGH_SPEED_FRICTION_THRESHOLD_LAT_FADE_START, KONA_EV_2022_HIGH_SPEED_FRICTION_THRESHOLD_LAT_FADE_END],
+    [1.0, 0.0],
+  ))
+  return base_threshold + KONA_EV_2022_HIGH_SPEED_FRICTION_THRESHOLD_GAIN * high_speed_weight * curve_weight
 
 
 def get_kona_ev_2022_center_output_scale(desired_lateral_accel: float, v_ego: float) -> float:
@@ -3561,6 +3592,15 @@ def get_genesis_g70_highway_turn_in_output_scale(output_torque: float, setpoint:
   tracking_weight = np.interp(abs(measured_lateral_accel / setpoint),
                               GENESIS_G70_HIGHWAY_TURN_IN_TRACKING_BP, [0.0, 1.0, 0.0])
   return 1.0 - GENESIS_G70_HIGHWAY_TURN_IN_OUTPUT_REDUCTION * speed_weight * curve_weight * jerk_weight * tracking_weight
+
+
+def get_genesis_g70_center_measurement_damping_gain(v_ego: float, desired_lateral_accel: float,
+                                                   measured_lateral_accel: float, desired_lateral_jerk: float) -> float:
+  speed_weight = np.interp(v_ego, GENESIS_G70_CENTER_MEASUREMENT_DAMPING_SPEED_BP, [0.0, 1.0])
+  center_weight = np.interp(max(abs(desired_lateral_accel), abs(measured_lateral_accel)),
+                            GENESIS_G70_CENTER_MEASUREMENT_DAMPING_LAT_BP, [1.0, 0.0])
+  jerk_weight = np.interp(abs(desired_lateral_jerk), GENESIS_G70_CENTER_MEASUREMENT_DAMPING_JERK_BP, [1.0, 0.0])
+  return float(GENESIS_G70_CENTER_MEASUREMENT_DAMPING_MAX * speed_weight * center_weight * jerk_weight)
 
 
 def get_genesis_g70_stabilized_output(output_torque: float, prev_output_torque: float,

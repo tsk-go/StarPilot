@@ -5,7 +5,7 @@ from opendbc.car.toyota.radar_interface import RadarInterface
 from opendbc.car.toyota.values import Ecu, CAR, DBC, ToyotaFlags, CarControllerParams, TSS2_CAR, RADAR_ACC_CAR, NO_DSU_CAR, \
                                                   MIN_ACC_SPEED, EPS_SCALE, NO_STOP_TIMER_CAR, ANGLE_CONTROL_CAR, \
                                                   ToyotaSafetyFlags, LEGACY_PRIUS_CAR, TOYOTA_AUTO_HOLD_CARS, \
-                                                  TOYOTA_AUTO_HOLD_AEB_CARS
+                                                  uses_toyota_auto_hold_aeb
 from opendbc.car.disable_ecu import disable_ecu
 from opendbc.car.interfaces import CarInterfaceBase
 from opendbc.safety import ALTERNATIVE_EXPERIENCE
@@ -167,7 +167,7 @@ class CarInterface(CarInterfaceBase):
     toyota_auto_hold = Params(return_defaults=True).get_bool("ToyotaAutoHold")
     if toyota_auto_hold and ret.openpilotLongitudinalControl and candidate in TOYOTA_AUTO_HOLD_CARS:
       ret.alternativeExperience |= (ALTERNATIVE_EXPERIENCE.ALLOW_AEB
-                                    if candidate in TOYOTA_AUTO_HOLD_AEB_CARS
+                                    if uses_toyota_auto_hold_aeb(ret)
                                     else ALTERNATIVE_EXPERIENCE.TOYOTA_AUTO_HOLD)
       ret.flags |= ToyotaFlags.AUTO_BRAKE_HOLD.value
 

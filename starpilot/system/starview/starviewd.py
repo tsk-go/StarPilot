@@ -31,7 +31,6 @@ Design notes:
 import asyncio
 import fcntl
 import hashlib
-import ipaddress
 import pty
 import signal
 import termios
@@ -54,6 +53,7 @@ from cereal import messaging
 from cereal.services import SERVICE_LIST
 from openpilot.common.params import Params, ParamKeyType
 from openpilot.common.swaglog import cloudlog
+from openpilot.starpilot.system.starview import pairing
 
 try:
   from openpilot.system.version import get_build_metadata
@@ -593,6 +593,11 @@ class Hub:
     self.started = False
     self._info = {}
     self._info_t = 0.0
+    self._car_state_sock = None
+    # one params snapshot per second shared by every connected tablet (~150 param reads each)
+    self._snap_lock = threading.Lock()
+    self._snap = None
+    self._snap_t = 0.0
     self.thread = threading.Thread(target=self._reader, name="starview-reader", daemon=True)
     self.thread.start()
 
@@ -659,6 +664,19 @@ class Hub:
       return self.params.get("IsOnroad") in (b"1", "1", True, 1)
     except Exception:
       return False
+
+  def _moving(self) -> bool:
+    """Car speed from carState (control actions only). No carState within 0.25 s means the car isn't running."""
+    if not self._onroad() and not self.started:
+      return False
+    try:
+      if self._car_state_sock is None:
+        self._car_state_sock = messaging.sub_sock("carState", conflate=True, timeout=250)
+      msg = messaging.recv_one(self._car_state_sock)
+      return msg is not None and msg.carState.vEgo > 0.5
+    except Exception as e:
+      cloudlog.warning(f"starview: carState read failed: {e}")
+      return True  # can't tell: refuse rather than risk switching while moving
 
   def video_health_tick(self):
     """Cameras deliver frames but the encoders put out nothing: on 09-24 both encoders sat silent for minutes (drive
@@ -790,8 +808,10 @@ class Hub:
       connected = bool(self.data_clients)
     if connected:
       self._tablet_seen = now
-    # hold 30 s through app switches / reconnects: every drop used to light the comma screen up again
-    on = self.tablet_mode and (connected or now - getattr(self, "_tablet_seen", -1e9) < 30.0)
+    # Parked: hold 30 s through app switches / reconnects (every drop used to light the comma screen up again).
+    # Driving: no hold, so the comma screen comes back within ~5 s (the UI's staleness limit) if the tablet dies.
+    hold_s = 0.0 if (self.started or self._onroad()) else 30.0
+    on = self.tablet_mode and (connected or now - getattr(self, "_tablet_seen", -1e9) < hold_s)
     if on != getattr(self, "_flag_logged", None):
       self._flag_logged = on
       cloudlog.info(f"starview: tablet flag {'ON' if on else 'OFF'} (clients {len(self.data_clients)}, mode {self.tablet_mode})")
@@ -875,10 +895,24 @@ class Hub:
         return None
     return v
 
+  def params_snapshot(self):
+    """Every data client asks once a second; build it at most once per ~second for all of them."""
+    with self._snap_lock:
+      now = time.monotonic()
+      if self._snap is None or now - self._snap_t >= 0.9:
+        self._snap = self._build_params_snapshot()
+        self._snap_t = now
+      return self._snap
+
   def ops_info_dirty(self):
     self._info_t = 0.0
+    self.invalidate_params_snapshot()
 
-  def params_snapshot(self):
+  def invalidate_params_snapshot(self):
+    with self._snap_lock:
+      self._snap = None  # an action changed something: the next snapshot is read fresh
+
+  def _build_params_snapshot(self):
     out = {"type": "params", "p": {}, "m": {}}
     for k in UI_PARAMS_PERSISTENT:
       v = self._read_param(self.params, k)
@@ -954,6 +988,9 @@ class Hub:
         self.params.put_bool("OnroadCycleRequested", True)
         return {"ok": True}
       if act == "reboot":
+        # HARDWARE.reboot() is immediate (no manager deferral), so only while the car is off / the comma is offroad
+        if self.started or self._onroad():
+          return {"ok": False, "error": "Reboot is available while the car is off."}
         self.params.put_bool("DoUserReboot", True)
         try:
           from openpilot.system.hardware import HARDWARE
@@ -1042,6 +1079,11 @@ class Hub:
         return {"ok": True, "tablet_mode": self.tablet_mode}
       if act == "drive_state":  # "default" | "onroad" | "offroad"  (same as Galaxy / settings Force drive state)
         mode = req.get("mode", "default")
+        # switching onroad/offroad starts or stops openpilot: never while engaged or while the car is moving
+        if self.engaged:
+          return {"ok": False, "error": "Disengage to change the drive state."}
+        if self._moving():
+          return {"ok": False, "error": "Stop the car to change the drive state."}
         self.params.put_bool("ForceOnroad", mode == "onroad")
         self.params.put_bool("ForceOffroad", mode == "offroad")
         return {"ok": True, "mode": mode}
@@ -1117,6 +1159,7 @@ def hello(hub: Hub):
 
 
 async def ws_data(request):
+  require_paired(request)
   hub: Hub = request.app["hub"]
   ws = web.WebSocketResponse(max_msg_size=0, heartbeat=10, compress=False)
   await ws.prepare(request)
@@ -1169,6 +1212,7 @@ async def ws_data(request):
           ack["type"] = "ack"
           ack["id"] = req.get("id")
           await ws.send_str(json.dumps(ack))
+          hub.invalidate_params_snapshot()
           c.force_params = True
         elif req.get("get") == "params":
           c.force_params = True
@@ -1183,6 +1227,7 @@ async def ws_data(request):
 
 
 async def ws_video(request):
+  require_paired(request)
   hub: Hub = request.app["hub"]
   cam = request.match_info["cam"]
   if cam not in VIDEO_CAMS:
@@ -1214,75 +1259,53 @@ async def ws_video(request):
   return ws
 
 
-# ------------------------------------------------------------------------------------------ terminal
-# WS /term: a login shell in a pty (binary frames both ways; text {"resize":[cols,rows]}).  Full shell access, so by
-# default only peers on a directly attached USB link (usb*/rndis*/ncm* interface subnet) may open it.
-# STARVIEW_TERM_ANY=1 lifts that (e.g. to use it over Wi-Fi at home).
+# ------------------------------------------------------------------------------------------ access
+# Every endpoint except UDP discovery and /regulatory needs one of: this device itself, a tablet on the USB tether
+# (until "usb needs key" is switched on in the comma's StarView settings), or a tablet paired by scanning the QR code
+# there, which sends the key with every request (header X-StarView-Key, or ?key= from the terminal WebView).
+# Keys are only accepted from private / link-local addresses. Ethernet links are not trusted like the tether.
+# STARVIEW_TERM_ANY=1 (debug only) accepts any peer without a key.
 TERM_ANY = os.getenv("STARVIEW_TERM_ANY", "0") == "1"
 
 
 def _usb_subnets():
-  nets = []
-  try:
-    r = subprocess.run(["ip", "-4", "-o", "addr"], capture_output=True, text=True, timeout=5)
-    for line in r.stdout.splitlines():
-      parts = line.split()
-      if len(parts) >= 4 and parts[1].startswith(("usb", "rndis", "ncm", "eth")) and parts[2] == "inet":
-        nets.append(ipaddress.ip_network(parts[3], strict=False))
-  except Exception:
-    pass
-  return nets
-
-
-TERM_KEY_FILE = Path("/data/starview/termkey")
+  return pairing.usb_subnets()
 
 
 def term_key() -> str:
-  """Random shell/file key. Given out only over the USB link (GET /termkey); with it, the tablet may also use the
-  terminal and Files over a private (LAN) Wi-Fi address when the cable drops."""
-  try:
-    k = TERM_KEY_FILE.read_text().strip()
-    if len(k) >= 32:
-      return k
-  except OSError:
-    pass
-  k = secrets.token_hex(24)
-  try:
-    TERM_KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    TERM_KEY_FILE.write_text(k)
-    os.chmod(TERM_KEY_FILE, 0o600)
-  except OSError as e:
-    cloudlog.warning(f"starview: cannot store terminal key: {e}")
-  return k
+  return pairing.get_key()
 
 
 def _usb_peer(remote: str) -> bool:
-  try:
-    ip = ipaddress.ip_address(remote)
-  except Exception:
-    return False
-  return ip.is_loopback or any(ip in n for n in _usb_subnets())
+  return pairing.is_usb_peer(remote)
+
+
+def _request_key(request) -> str:
+  return request.headers.get(pairing.KEY_HEADER, "") or request.query.get("key", "")
 
 
 def term_allowed(request) -> bool:
-  remote = request.remote or ""
-  if TERM_ANY or _usb_peer(remote):
-    return True
-  # Wi-Fi: only private-network peers that present the key handed out over USB
-  try:
-    ip = ipaddress.ip_address(remote)
-  except Exception:
-    return False
-  if not ip.is_private:
-    return False
-  given = request.query.get("key", "") or request.headers.get("X-StarView-Key", "")
-  return bool(given) and secrets.compare_digest(given, term_key())
+  return TERM_ANY or pairing.is_authorized(request.remote or "", _request_key(request))
+
+
+def require_paired(request):
+  if not term_allowed(request):
+    raise web.HTTPUnauthorized(text=json.dumps({"error": "pairing required",
+                                                "hint": "scan the StarView QR code in the comma's settings"}),
+                               content_type="application/json")
 
 
 async def http_termkey(request):
-  if not _usb_peer(request.remote or ""):
-    raise web.HTTPForbidden(text="the key is only handed out over the USB link")
+  # Older app versions fetch the key over the cable. Only while the cable is trusted: once "usb needs key" is on,
+  # pairing goes through the QR code only.
+  if pairing.usb_requires_key() or not _usb_peer(request.remote or ""):
+    raise web.HTTPForbidden(text="pair by scanning the StarView QR code in the comma's settings")
   return web.json_response({"key": term_key()})
+
+
+# ------------------------------------------------------------------------------------------ terminal
+# WS /term: a login shell in a pty (binary frames both ways; text {"resize":[cols,rows]}).  Full shell access; same
+# access rule as every other endpoint (see above).
 
 
 # Sessions outlive the WebSocket: leaving the tablet app (or a flaky link) only DETACHES; the shell and whatever runs in
@@ -1618,6 +1641,7 @@ async def fs_op(request):
 
 
 async def http_status(request):
+  require_paired(request)
   return web.json_response(request.app["hub"].status())
 
 
@@ -1648,6 +1672,7 @@ def storage_info():
 
 
 async def http_storage(request):
+  require_paired(request)
   return web.json_response(await asyncio.get_running_loop().run_in_executor(None, storage_info))
 
 
@@ -1660,6 +1685,7 @@ async def http_regulatory(request):
 
 
 async def http_index(request):
+  require_paired(request)
   return web.Response(text=TEST_PAGE, content_type="text/html")
 
 
@@ -1750,7 +1776,9 @@ def discovery_thread(hub: Hub):
       h = hello(hub)
       reply = json.dumps({"type": "starview", "port": PORT, "dongleId": h.get("dongleId", ""),
                           "branch": h.get("branch", ""), "commit": h.get("commit", ""),
-                          "live_streaming": hub.live, "unix_ns": time.time_ns()}).encode()
+                          "live_streaming": hub.live, "unix_ns": time.time_ns(),
+                          # USB tether peers are trusted until "usb needs key" is on; everyone else must scan the QR
+                          "pairing_required": pairing.usb_requires_key() or not pairing.is_usb_peer(addr[0])}).encode()
       s.sendto(reply, addr)
     except Exception as e:
       cloudlog.warning(f"starview: discovery: {e}")
@@ -1899,7 +1927,9 @@ def tablet_flag_thread(hub):
 def log_archive_thread():
   """Parked only: copy finished drives from internal storage to the USB stick (logarchive.py mounts, copies, unmounts).
   loggerd itself always records to internal storage - a stalling stick can never reach the driving processes."""
-  script = "/data/starview/logarchive.py"
+  # bundled with this file; the old installer copied it to /data/starview instead
+  bundled = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logarchive.py")
+  script = bundled if os.path.exists(bundled) else "/data/starview/logarchive.py"
   time.sleep(90)
   while True:
     try:

@@ -7,9 +7,14 @@ normal gpsLocationExternal - navigation, speed-limit maps, the tablet's GPS brid
 Phone app: gpsdRelay (F-Droid, io.github.project_kaat.gpsdrelay) or GPSd Forwarder - send NMEA over UDP to the
 comma's IP (or the network's broadcast address), port 29998.
 
+Who may send: only the comma's default gateway (when the comma is on the phone's hotspot, that IS the phone, so no
+setup), the comma itself, and any addresses listed in /data/starview/gps_phone_ips (for a phone and comma on another
+Wi-Fi). Anything else could feed a fake position (-> wrong map speed limits), so it's dropped and counted in the status.
+
 Source choice, file /data/starview/gps_source (default "fused"):
   fused    - phone + comma GPS + the car's wheel speed and the comma's gyro, 10 Hz, keeps going in tunnels
-             (gps_fusion.py)
+             (gps_fusion.py). Only while the phone has sent something in the last PHONE_ACTIVE_S: without a phone the
+             comma's own GPS goes out unchanged, exactly as before.
   auto     - the comma's own GPS when it's good (fix, <= 10 m, >= 6 satellites, steadily for 10 s), else the phone
   phone    - the phone whenever it has a fresh fix, else the comma's own
   internal - ignore the phone
@@ -34,7 +39,13 @@ def _wall() -> float:
 PORT = 29998
 MODE_PATH = "/data/starview/gps_source"
 STATUS_PATH = "/dev/shm/gps_source.json"
+ALLOWED_IPS_PATH = "/data/starview/gps_phone_ips"
+ROUTE_PATH = "/proc/net/route"
+ALLOWED_REFRESH_S = 5.0
+CELLULAR_IFACES = ("rmnet", "wwan", "ccmni")  # the carrier's gateway is not a phone in the car
 PHONE_FRESH_S = 2.5
+PHONE_ACTIVE_S = 30.0       # fused output only while the phone has sent anything this recently (fix or not: tunnels)
+TIME_STEP_MAX_S = 2.0       # one reading moves the satellite-time offset by at most this much
 INTERNAL_GOOD_HACC = 10.0
 INTERNAL_GOOD_SATS = 6
 INTERNAL_GOOD_HOLD_S = 10.0
@@ -74,6 +85,43 @@ def _f(v: str) -> float | None:
     return None
 
 
+def default_gateways(route_path: str | None = None) -> set[str]:
+  """IPv4 default gateways from the kernel's routing table, except cellular ones."""
+  out = set()
+  try:
+    with open(route_path or ROUTE_PATH) as f:
+      next(f, None)
+      for line in f:
+        parts = line.split()
+        if len(parts) < 4 or parts[1] != "00000000" or parts[0].startswith(CELLULAR_IFACES):
+          continue
+        if not int(parts[3], 16) & 0x2:   # RTF_GATEWAY
+          continue
+        gw = socket.inet_ntoa(int(parts[2], 16).to_bytes(4, "little"))
+        if gw != "0.0.0.0":
+          out.add(gw)
+  except (OSError, ValueError):
+    pass
+  return out
+
+
+def listed_ips(path: str | None = None) -> set[str]:
+  """Extra phone addresses from the override file: separated by spaces, commas or new lines; # starts a comment."""
+  out = set()
+  try:
+    with open(path or ALLOWED_IPS_PATH) as f:
+      for line in f:
+        for tok in line.split("#", 1)[0].replace(",", " ").split():
+          try:
+            socket.inet_aton(tok)
+            out.add(tok)
+          except OSError:
+            pass
+  except OSError:
+    pass
+  return out
+
+
 class PhoneGps:
   def __init__(self, port: int = PORT):
     self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -93,6 +141,23 @@ class PhoneGps:
     self.pending: list = []          # finished fixes waiting to be published
     self._last_t = None
     self._gga_mono = 0.0
+    self.last_msg_mono = 0.0         # any accepted packet, with or without a fix
+    self.allowed: set[str] = set()
+    self._allowed_at = float("-inf")
+    self.rejected = 0
+    self.rejected_from: dict[str, int] = {}
+
+  def allowed_senders(self) -> set[str]:
+    now = time.monotonic()
+    if now - self._allowed_at >= ALLOWED_REFRESH_S:   # the hotspot's gateway can change after a phone restart
+      self._allowed_at = now
+      self.allowed = default_gateways() | listed_ips() | {"127.0.0.1"}
+    return self.allowed
+
+  def _reject(self, ip: str) -> None:
+    self.rejected += 1
+    if ip in self.rejected_from or len(self.rejected_from) < 8:
+      self.rejected_from[ip] = self.rejected_from.get(ip, 0) + 1
 
   def poll(self) -> list:
     """Read everything waiting on the socket; returns finished fixes (dicts)."""
@@ -103,8 +168,12 @@ class PhoneGps:
         break
       except OSError:
         break
+      if addr[0] not in self.allowed_senders():
+        self._reject(addr[0])
+        continue
       self.sender = addr[0]
       self.packets += 1
+      self.last_msg_mono = time.monotonic()
       self.buf += data.decode("ascii", "ignore")
       if len(self.buf) > 20000:
         self.buf = self.buf[-4000:]
@@ -158,15 +227,20 @@ class PhoneGps:
       d = r["date"]
       hh, mm, ss = int(t[0:2]), int(t[2:4]), float(t[4:])
       unix = calendar.timegm((2000 + int(d[4:6]), int(d[2:4]), int(d[0:2]), hh, mm, int(ss), 0, 0, 0)) + (ss - int(ss))
+      time_ok = True
     except (ValueError, IndexError):
-      unix = _wall()
+      unix, time_ok = _wall(), False
     self.last_fix_mono = time.monotonic()
     self.pending.append({"lat": r["lat"], "lon": r["lon"], "alt": (g.get("alt") if same else None) or 0.0,
                          "speed": speed, "bearing": self.bearing, "hacc": hacc,
-                         "sats": g.get("sats", 0) if same else self.sats, "unix": unix})
+                         "sats": g.get("sats", 0) if same else self.sats, "unix": unix, "time_ok": time_ok})
 
   def fresh(self) -> bool:
     return time.monotonic() - self.last_fix_mono < PHONE_FRESH_S
+
+  def active(self) -> bool:
+    """The phone is there: it sent something lately, even without a fix (tunnel)."""
+    return self.last_msg_mono > 0 and time.monotonic() - self.last_msg_mono < PHONE_ACTIVE_S
 
 
 def phone_message(fix: dict):
@@ -194,11 +268,11 @@ def phone_message(fix: dict):
 class GpsMux:
   """Decides, per message, whether the comma's own fix or the phone's goes out as gpsLocationExternal."""
 
-  def __init__(self):
+  def __init__(self, port: int = PORT):
     self.phone = None
     self.error = ""
     try:
-      self.phone = PhoneGps()
+      self.phone = PhoneGps(port)
     except OSError as e:
       self.error = f"can't listen on UDP {PORT}: {e}"
     self.mode = "fused"
@@ -216,7 +290,34 @@ class GpsMux:
     self.int_sats = 0
     self.int_hacc = 0.0
     self.int_last = 0.0
+    self.int_time_mono = float("-inf")
     self.sent_phone = 0
+    # satellite time = time.monotonic() + time_offset. Against the monotonic clock, not the wall clock: timed resets
+    # the wall clock from our own output, and an offset kept against the wall clock would chase that reset.
+    self.time_offset: float | None = None
+    self.time_src = ""
+
+  def phone_active(self) -> bool:
+    return self.phone is not None and self.phone.active()
+
+  def _time_reading(self, sat_unix: float, src: str) -> None:
+    """A GPS reading was accepted: learn how far satellite time is from the comma's clock. Prefer the comma's own
+    GPS; a single far-off reading moves the offset by at most TIME_STEP_MAX_S."""
+    now = time.monotonic()
+    if src == "phone" and now - self.int_time_mono < 5.0:
+      return
+    if src == "comma":
+      self.int_time_mono = now
+    new = sat_unix - now
+    if self.time_offset is None:
+      self.time_offset = new
+    else:
+      self.time_offset += max(-TIME_STEP_MAX_S, min(TIME_STEP_MAX_S, new - self.time_offset))
+    self.time_src = src
+
+  def sat_time(self) -> float:
+    """Best guess of satellite (UTC) time now; the comma's clock until a GPS reading was accepted."""
+    return time.monotonic() + self.time_offset if self.time_offset is not None else _wall()
 
   def _read_mode(self) -> None:
     now = time.monotonic()
@@ -244,21 +345,24 @@ class GpsMux:
       self.int_bad_since = self.int_bad_since or now
     self._choose()
     if self.mode == "fused":
-      # comma's own fix into the filter (1 Hz is plenty; its errors are correlated from one fix to the next)
+      # comma's own fix into the filter (1 Hz is plenty; its errors are correlated from one fix to the next). Also while
+      # there's no phone, so the filter is ready the moment the phone shows up.
       if self.int_fix and self.int_hacc <= 50.0 and _wall() - self.last_int_feed >= 1.0:
         self.last_int_feed = _wall()
         try:
-          self.fusion.gps(_wall(), g.latitude, g.longitude, g.altitude, max(self.int_hacc, 2.5), g.speed,
-                          g.bearingDeg if g.speed > 1.0 else None, g.unixTimestampMillis / 1e3, self.int_sats, "comma")
+          if self.fusion.gps(_wall(), g.latitude, g.longitude, g.altitude, max(self.int_hacc, 2.5), g.speed,
+                             g.bearingDeg if g.speed > 1.0 else None, g.unixTimestampMillis / 1e3, self.int_sats, "comma"):
+            self._time_reading(g.unixTimestampMillis / 1e3, "comma")
         except Exception:
           pass
-      return False
+      # no phone lately: the comma's own fix goes out unchanged, exactly as without this file
+      return not self.phone_active()
     return self.source == "internal"
 
   def _choose(self) -> None:
     self._read_mode()
     if self.mode == "fused":
-      self.source = "fused"
+      self.source = "fused" if self.phone_active() else "internal (no phone)"
       return
     now = time.monotonic()
     phone_ok = self.phone is not None and self.phone.fresh()
@@ -328,7 +432,7 @@ class GpsMux:
     gps.bearingDeg = f.heading
     gps.horizontalAccuracy = f.hacc()
     gps.satelliteCount = 0 if f.dead_reckoning(now) else f.sats
-    gps.unixTimestampMillis = int(now * 1e3)
+    gps.unixTimestampMillis = int(self.sat_time() * 1e3)   # satellite time, so timed can still correct a wrong clock
     b = math.radians(f.heading)
     gps.vNED = [f.speed * math.cos(b), f.speed * math.sin(b), 0.0]
     gps.verticalAccuracy = f.hacc() * 1.5
@@ -343,10 +447,12 @@ class GpsMux:
       if self.phone is not None:
         for fix in self.phone.poll():
           crs = fix["bearing"] if fix["speed"] > 1.0 else None
-          self.fusion.gps(_wall(), fix["lat"], fix["lon"], fix["alt"], fix["hacc"], fix["speed"], crs, fix["unix"],
-                          fix["sats"], "phone")
-      self.source = "fused"
-      self._fused_out(pm)
+          if self.fusion.gps(_wall(), fix["lat"], fix["lon"], fix["alt"], fix["hacc"], fix["speed"], crs, fix["unix"],
+                             fix["sats"], "phone") and fix.get("time_ok"):
+            self._time_reading(fix["unix"], "phone")
+      self._choose()
+      if self.phone_active():
+        self._fused_out(pm)
       self._status()
       return
     if self.phone is not None:
@@ -367,7 +473,11 @@ class GpsMux:
     st = {"mode": self.mode, "source": self.source, "error": self.error,
           "phone": {"fresh": bool(p and p.fresh()), "ageS": round(now - p.last_fix_mono, 1) if p and p.last_fix_mono else None,
                     "sats": p.sats if p else 0, "from": p.sender if p else "", "packets": p.packets if p else 0,
-                    "published": self.sent_phone},
+                    "published": self.sent_phone, "active": self.phone_active(),
+                    "allowed": sorted(p.allowed) if p else [], "rejected": p.rejected if p else 0,
+                    "rejectedFrom": dict(p.rejected_from) if p else {}},
+          "time": {"source": self.time_src, "offsetS": round(self.time_offset + time.monotonic() - _wall(), 1)
+                   if self.time_offset is not None else None},
           "fused": dict(self.fusion.status(_wall()), published=self.sent_fused) if self.mode == "fused" else None,
           "internal": {"fix": self.int_fix, "sats": self.int_sats, "hAccM": round(self.int_hacc, 1),
                        "ageS": round(now - self.int_last, 1) if self.int_last else None},

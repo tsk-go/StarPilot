@@ -395,7 +395,9 @@ class MapboxRouteEngine:
   def __init__(self, session: Any = requests):
     self._session = session
 
-  def fetch_route(self, token: str, start: Coordinate, destination: dict[str, Any], bearing: float | None = None) -> NavigationRoute | None:
+  def fetch_route(self, token: str, start: Coordinate, destination: dict[str, Any], bearing: float | None = None,
+                  via: Coordinate | None = None) -> NavigationRoute | None:
+    """via: optional silent via point (Waze wins: forces the route onto the road Waze chose; no extra 'arrive' step)."""
     if not token:
       return None
 
@@ -412,9 +414,13 @@ class MapboxRouteEngine:
       "banner_instructions": "true",
     }
     if bearing is not None:
-      params["bearings"] = f"{int((bearing + 360.0) % 360.0)},90;"
+      params["bearings"] = f"{int((bearing + 360.0) % 360.0)},90;" + (";" if via is not None else "")
 
-    url = f"{self.DIRECTIONS_URL}/{start.longitude},{start.latitude};{end.longitude},{end.latitude}"
+    if via is not None:
+      params["waypoints"] = "0;2"   # coordinate 1 is a via point: no leg split, no arrival instruction
+      url = f"{self.DIRECTIONS_URL}/{start.longitude},{start.latitude};{via.longitude},{via.latitude};{end.longitude},{end.latitude}"
+    else:
+      url = f"{self.DIRECTIONS_URL}/{start.longitude},{start.latitude};{end.longitude},{end.latitude}"
     try:
       response = self._session.get(url, params=params, timeout=5)
       data = response.json() if response.status_code == 200 else {}

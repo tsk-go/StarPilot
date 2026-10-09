@@ -15,6 +15,8 @@ Endpoints (default port 8090, env STARVIEW_PORT):
   WS   /term             bash in a pty, persistent per ?sid=
   GET  /hello?n=<nonce>  pairing step 1: proof that this comma holds the tablet's pairing key (see pairing.py)
   POST /auth             pairing step 2: the tablet's proof -> a session pass for every other endpoint
+  POST /waze             the tablet's Waze reader: raw Waze screen snapshot -> parsed + compared with the Mapbox
+                         route (starpilot/navigation/waze_bridge.py); GET /waze = last result
   HTTP /fs/*             file browser API for the tablet's Files screen (same guard) -- see the files section
   WS   /video/{road|wide|driver}
                          binary frames: 28-byte header | H.264 Annex-B (SPS/PPS prepended on keyframes)
@@ -83,7 +85,7 @@ UI_PARAMS_PERSISTENT = [
   "DynamicPedalsOnUI", "ShowBrakeStatus", "OnroadDistanceButton", "HideSteeringWheel", "RotatingWheel",
   "ExperimentalMode", "ExperimentalModeConfirmed", "SafeMode", "ConditionalExperimental", "PersistExperimentalState",
   "ShowSpeedLimits", "UseVienna", "ShowSLCOffset", "SpeedLimitSources", "SLCAbbreviatedSources", "SLCActiveSourcesOnly",
-  "RoadNameUI", "NavigationUI", "NavDestination", "EnableTorqueBarWidget", "ShowSteering", "SignalMetrics",
+  "RoadNameUI", "NavigationUI", "NavDestination", "NavLanePositioningAllowed", "NavDesiresAllowed", "EnableTorqueBarWidget", "ShowSteering", "SignalMetrics",
   "BlindSpotMetrics", "ShowCSCStatus", "BorderWidth", "StoppedTimer", "QOLVisuals", "Compass", "AlwaysOnDM",
   "DeveloperUI", "DeveloperMetrics", "DeveloperSidebar", "LongitudinalPersonality", "DriverCamera",
   "GalaxyDeviceName", "DongleId", "ForceOnroad", "ForceOffroad",
@@ -1695,6 +1697,38 @@ async def fs_op(request):
   return web.json_response({"ok": True})
 
 
+_WAZE_FEED = None
+
+
+def _waze_feed():
+  global _WAZE_FEED
+  if _WAZE_FEED is None:
+    from openpilot.starpilot.navigation.waze_bridge import WazeFeed
+    _WAZE_FEED = WazeFeed()
+  return _WAZE_FEED
+
+
+async def http_waze_post(request):
+  require_paired(request)
+  try:
+    snap = await request.json()
+  except Exception:
+    raise web.HTTPBadRequest(text="JSON body expected") from None
+  if not isinstance(snap, dict):
+    raise web.HTTPBadRequest(text="JSON object expected")
+  try:
+    res = await asyncio.get_running_loop().run_in_executor(None, _waze_feed().ingest, snap)
+  except Exception as e:
+    cloudlog.warning(f"starview: waze ingest: {e}")
+    return web.json_response({"ok": False, "error": str(e)[:300]}, status=500)
+  return web.json_response(res)
+
+
+async def http_waze_get(request):
+  require_paired(request)
+  return web.json_response(_waze_feed().status())
+
+
 async def http_status(request):
   require_paired(request)
   return web.json_response(request.app["hub"].status())
@@ -2026,6 +2060,8 @@ def main():
     web.get("/term", ws_term),
     web.get("/hello", http_hello),
     web.post("/auth", http_auth),
+    web.post("/waze", http_waze_post),
+    web.get("/waze", http_waze_get),
     web.get("/fs/list", fs_list),
     web.get("/fs/walk", fs_walk),
     web.get("/fs/get", fs_get),

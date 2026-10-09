@@ -12,6 +12,7 @@ from openpilot.common.swaglog import cloudlog
 
 from openpilot.starpilot.navigation.destination_store import parse_destination_json
 from openpilot.starpilot.navigation.route_engine import Coordinate, MapboxRouteEngine, NavigationRoute, RouteProgress
+from openpilot.starpilot.navigation.waze_bridge import WazeHybrid
 
 NAVIGATIOND_HZ = 1
 REROUTE_TRIGGER_SECONDS = 2.0
@@ -42,6 +43,7 @@ class Navigationd:
     self._bearing_misaligned_started_at: float | None = None
     self._arrival_started_at: float | None = None
     self._last_nav_state: dict[str, object] | None = None
+    self._waze = WazeHybrid(self.params, self.params_memory, log=cloudlog)
 
   @staticmethod
   def _destination_key(destination: dict[str, object] | None) -> tuple[str, str, float, float] | None:
@@ -77,7 +79,7 @@ class Navigationd:
     if remove_destination:
       self.params.remove("NavDestination")
 
-  def _start_route_fetch(self, destination: dict[str, object]) -> None:
+  def _start_route_fetch(self, destination: dict[str, object], via: tuple[float, float] | None = None) -> None:
     if self._last_position is None or self._route_fetch_inflight:
       return
 
@@ -96,7 +98,9 @@ class Navigationd:
       self._requested_destination_key = destination_key
 
     def worker():
-      route = self.route_engine.fetch_route(token, position, destination, bearing)
+      via_coord = Coordinate(via[0], via[1]) if via is not None else None
+      route = self.route_engine.fetch_route(token, position, destination, bearing, via=via_coord) if via_coord is not None \
+        else self.route_engine.fetch_route(token, position, destination, bearing)
       with self._route_lock:
         still_current = self._requested_destination_key == destination_key
         self._route_fetch_inflight = False
@@ -318,9 +322,32 @@ class Navigationd:
       "nextManeuverModifier": str(next_maneuver.get("modifier") or ""),
       "nextManeuverDistance": float(next_maneuver.get("distance") or 0.0),
     }
+    try:
+      state.update(self._waze.state_fields(state, self._upcoming_steps(route, progress)))
+    except Exception as e:
+      cloudlog.warning(f"waze compare failed: {e}")
     if state != self._last_nav_state:
       self.params_memory.put_nonblocking("NavInstructionState", state)
       self._last_nav_state = state
+
+  @staticmethod
+  def _upcoming_steps(route: NavigationRoute | None, progress: RouteProgress | None) -> list[tuple[str, float | None]]:
+    """(text, distance) of the next few route steps, for matching Waze's maneuver against later steps."""
+    out: list[tuple[str, float | None]] = []
+    if route is None or progress is None:
+      return out
+    start = max(progress.current_step_index, 0)
+    dists = [float(m.get("distance") or 0.0) for m in (progress.all_maneuvers or []) if isinstance(m, dict)]
+    for k, step in enumerate(route.steps[start:start + 5]):
+      dist = dists[k] if k < len(dists) else None
+      texts = [step.instruction]
+      for b in step.banner_instructions or []:
+        if isinstance(b, dict) and isinstance(b.get("primary"), dict):
+          texts.append(str(b["primary"].get("text") or ""))
+      for t in texts:
+        if t:
+          out.append((t, dist))
+    return out
 
   def _publish_nav_route_if_needed(self) -> None:
     route, _, route_generation = self._snapshot_route()
@@ -343,6 +370,10 @@ class Navigationd:
 
     while True:
       location_valid, v_ego = self._update_location()
+      try:
+        self._waze.update(self._last_position if location_valid else None)
+      except Exception as e:
+        cloudlog.warning(f"waze update failed: {e}")
       current_destination = parse_destination_json(self.params.get("NavDestination", encoding="utf-8"))
       route, active_destination, _ = self._maybe_update_route(current_destination)
 
@@ -364,6 +395,15 @@ class Navigationd:
 
       self._publish_nav_instruction(route, progress, location_valid, payload)
       self._publish_nav_state(route, progress, location_valid, payload)
+      # Waze wins: a lasting disagreement reroutes StarPilot through a via point on the road Waze chose
+      try:
+        self._waze.maybe_waze_wins(self._last_position if location_valid else None, self._last_bearing, v_ego)
+        if current_destination is not None and not self._route_fetch_inflight:
+          via = self._waze.take_via()
+          if via is not None:
+            self._start_route_fetch(current_destination, via=via)
+      except Exception as e:
+        cloudlog.warning(f"waze wins failed: {e}")
       self._publish_nav_route_if_needed()
       self.rk.keep_time()
 

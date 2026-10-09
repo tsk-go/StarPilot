@@ -120,7 +120,8 @@ class GpsFusion:
   # ---------- correction ----------
   def gps(self, now: float, lat: float, lon: float, alt: float, hacc: float, speed: float, course: float | None,
           fix_time: float, sats: int, src: str) -> bool:
-    """One GPS fix. Returns True if it was used."""
+    """One GPS fix. Returns True if it was used. now / fix_time: seconds on one steady clock (ubloxd passes
+    time.monotonic(), and fix_time = the fix's satellite time moved onto it), never the wall clock."""
     hacc = max(hacc, 2.0)
     lag = now - fix_time
     if not (-0.5 <= lag <= 2.5):

@@ -29,7 +29,9 @@ from openpilot.starpilot.navigation import waze_parser
 
 
 def _wall() -> float:
-  return time.time()  # noqa: TID251  wall clock on purpose: compared with GPS UTC times / shared through files
+  # wall clock only for what people read (log names, times shown on the tablet). Every timer and age check uses
+  # time.monotonic(): timed can move the wall clock (GPS time), and CLOCK_MONOTONIC is the same in every process.
+  return time.time()  # noqa: TID251
 
 
 STATE_PATH = "/dev/shm/starview_waze.json"
@@ -121,7 +123,7 @@ class WazeFeed:
   def __init__(self):
     self._lock = threading.Lock()
     self._last_hash = ""
-    self._last_log = 0.0
+    self._last_log = float("-inf")  # monotonic
     self._last: dict[str, Any] = {}
     self._count = 0
     self._params = self._params_mem = None
@@ -131,7 +133,7 @@ class WazeFeed:
     self.route_label = ""
     self._handled_dest = ""       # destination already turned into NavDestination
     self._geocode_inflight = False
-    self._geocode_failed_at = 0.0
+    self._geocode_failed_at = float("-inf")  # monotonic
     self._geocode_failed_for = ""
     self._retry_s = GEOCODE_RETRY_S
     self._not_nav_since: float | None = None
@@ -145,6 +147,7 @@ class WazeFeed:
 
   def ingest(self, snap: dict[str, Any]) -> dict[str, Any]:
     now = _wall()
+    mono = time.monotonic()
     parsed = waze_parser.parse(snap)
     off = os.path.exists(OFF_FLAG)
     nav_state = None
@@ -154,13 +157,13 @@ class WazeFeed:
       if not off:
         self._route_tracking(parsed, params, mem)
       if snap.get("record"):
-        self._record(snap, parsed, now, params, mem, nav_state)
+        self._record(snap, parsed, now, mono, params, mem, nav_state)
     except Exception as e:
       parsed["error"] = str(e)[:200]
     if parsed.get("navigating") and not parsed.get("destination") and self.route_dest:
       parsed["destination"], parsed["destinationLabel"] = self.route_dest, self.route_label
       parsed["via"].append("destination:remembered")
-    state = {"receivedAt": now, "tabletT": snap.get("t"), "app": snap.get("app", ""), "parsed": parsed}
+    state = {"receivedAt": now, "receivedMono": mono, "tabletT": snap.get("t"), "app": snap.get("app", ""), "parsed": parsed}
     _atomic_write(STATE_PATH, json.dumps(state))
     cmp = waze_parser.compare(parsed, nav_state if isinstance(nav_state, dict) else None)
     if isinstance(nav_state, dict) and nav_state.get("wazeReroute"):
@@ -183,7 +186,7 @@ class WazeFeed:
         self.route_dest, self.route_label = dest, str(parsed.get("destinationLabel") or "")
       dest = dest or self.route_dest          # the sheet is closed again: keep trying with what was read
       if dest and dest != self._handled_dest and not self._geocode_inflight and \
-         not (dest == self._geocode_failed_for and _wall() - self._geocode_failed_at < self._retry_s):
+         not (dest == self._geocode_failed_for and time.monotonic() - self._geocode_failed_at < self._retry_s):
         self._start_geocode(dest, params, mem)
       return
     self._not_nav_since = self._not_nav_since or now
@@ -218,7 +221,7 @@ class WazeFeed:
       try:
         hit = geocode(text, keys, pos, self._session)
         if hit is None:
-          self._geocode_failed_at, self._geocode_failed_for, self._retry_s = _wall(), text, GEOCODE_RETRY_S
+          self._geocode_failed_at, self._geocode_failed_for, self._retry_s = time.monotonic(), text, GEOCODE_RETRY_S
           self.last_handoff = f"could not find {text!r}"
           _warn(self.last_handoff)
           return
@@ -233,7 +236,7 @@ class WazeFeed:
           _warn(f"{self.last_handoff} ({lat:.5f},{lon:.5f})")
       except Exception as e:
         # network trouble (no internet yet, DNS): retry soon; never show the URL (it carries the access token)
-        self._geocode_failed_at, self._geocode_failed_for, self._retry_s = _wall(), text, NET_RETRY_S
+        self._geocode_failed_at, self._geocode_failed_for, self._retry_s = time.monotonic(), text, NET_RETRY_S
         msg = str(e)
         if "resolution" in msg or "resolve" in msg:
           why = "no internet on the comma (DNS failed)"
@@ -255,12 +258,12 @@ class WazeFeed:
     with self._lock:
       return dict(self._last)
 
-  def _record(self, snap, parsed, now, params, mem, nav_state) -> None:
+  def _record(self, snap, parsed, now, mono, params, mem, nav_state) -> None:
     nodes_hash = hashlib.sha1(json.dumps(snap.get("nodes") or [], sort_keys=True).encode()).hexdigest()[:16]
     shot = snap.get("shot")
-    if nodes_hash == self._last_hash and now - self._last_log < 10.0 and not shot:
+    if nodes_hash == self._last_hash and mono - self._last_log < 10.0 and not shot:
       return
-    self._last_hash, self._last_log = nodes_hash, now
+    self._last_hash, self._last_log = nodes_hash, mono
     os.makedirs(LOG_DIR, exist_ok=True)
     day = time.strftime("%Y%m%d", time.localtime(now))
     rec = {"t": now, "hash": nodes_hash, "snap": {k: v for k, v in snap.items() if k != "shot"}, "parsed": parsed,
@@ -306,7 +309,7 @@ def load_state(max_age: float = FRESH_S) -> dict[str, Any] | None:
       st = json.load(f)
   except Exception:
     return None
-  if _wall() - float(st.get("receivedAt", 0)) > max_age:
+  if "receivedMono" not in st or time.monotonic() - float(st["receivedMono"]) > max_age:
     return None
   return st
 

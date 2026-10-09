@@ -279,8 +279,8 @@ class GpsMux:
     self.mode_checked = 0.0
     self.fusion = GpsFusion()
     self.sm = None
-    self.last_out = 0.0
-    self.last_int_feed = 0.0
+    self.last_out = float("-inf")        # monotonic
+    self.last_int_feed = float("-inf")   # monotonic
     self.sent_fused = 0
     self.status_written = 0.0
     self.source = "internal"
@@ -315,6 +315,13 @@ class GpsMux:
       self.time_offset += max(-TIME_STEP_MAX_S, min(TIME_STEP_MAX_S, new - self.time_offset))
     self.time_src = src
 
+  def fix_mono(self, unix: float, src: str, time_ok: bool = True) -> float:
+    """A fix's satellite time on the monotonic clock the filter runs on (its age = how late it arrived). Before the
+    offset is known, or without a readable time: the usual delay (the filter's own default)."""
+    if self.time_offset is None or not time_ok:
+      return time.monotonic() - (0.4 if src == "phone" else 0.05)
+    return unix - self.time_offset
+
   def sat_time(self) -> float:
     """Best guess of satellite (UTC) time now; the comma's clock until a GPS reading was accepted."""
     return time.monotonic() + self.time_offset if self.time_offset is not None else _wall()
@@ -347,11 +354,12 @@ class GpsMux:
     if self.mode == "fused":
       # comma's own fix into the filter (1 Hz is plenty; its errors are correlated from one fix to the next). Also while
       # there's no phone, so the filter is ready the moment the phone shows up.
-      if self.int_fix and self.int_hacc <= 50.0 and _wall() - self.last_int_feed >= 1.0:
-        self.last_int_feed = _wall()
+      if self.int_fix and self.int_hacc <= 50.0 and now - self.last_int_feed >= 1.0:
+        self.last_int_feed = now
         try:
-          if self.fusion.gps(_wall(), g.latitude, g.longitude, g.altitude, max(self.int_hacc, 2.5), g.speed,
-                             g.bearingDeg if g.speed > 1.0 else None, g.unixTimestampMillis / 1e3, self.int_sats, "comma"):
+          if self.fusion.gps(now, g.latitude, g.longitude, g.altitude, max(self.int_hacc, 2.5), g.speed,
+                             g.bearingDeg if g.speed > 1.0 else None, self.fix_mono(g.unixTimestampMillis / 1e3, "comma"),
+                             self.int_sats, "comma"):
             self._time_reading(g.unixTimestampMillis / 1e3, "comma")
         except Exception:
           pass
@@ -410,7 +418,7 @@ class GpsMux:
       return 0.0, None, False
 
   def _fused_out(self, pm) -> None:
-    now = _wall()
+    now = time.monotonic()   # the filter runs on the monotonic clock: a clock correction by timed doesn't touch it
     f = self.fusion
     v, yaw, car_ok = self._car()
     f.predict(now, v, yaw, car_ok)
@@ -447,8 +455,9 @@ class GpsMux:
       if self.phone is not None:
         for fix in self.phone.poll():
           crs = fix["bearing"] if fix["speed"] > 1.0 else None
-          if self.fusion.gps(_wall(), fix["lat"], fix["lon"], fix["alt"], fix["hacc"], fix["speed"], crs, fix["unix"],
-                             fix["sats"], "phone") and fix.get("time_ok"):
+          if self.fusion.gps(time.monotonic(), fix["lat"], fix["lon"], fix["alt"], fix["hacc"], fix["speed"], crs,
+                             self.fix_mono(fix["unix"], "phone", fix.get("time_ok", False)), fix["sats"], "phone") \
+             and fix.get("time_ok"):
             self._time_reading(fix["unix"], "phone")
       self._choose()
       if self.phone_active():
@@ -478,7 +487,7 @@ class GpsMux:
                     "rejectedFrom": dict(p.rejected_from) if p else {}},
           "time": {"source": self.time_src, "offsetS": round(self.time_offset + time.monotonic() - _wall(), 1)
                    if self.time_offset is not None else None},
-          "fused": dict(self.fusion.status(_wall()), published=self.sent_fused) if self.mode == "fused" else None,
+          "fused": dict(self.fusion.status(time.monotonic()), published=self.sent_fused) if self.mode == "fused" else None,
           "internal": {"fix": self.int_fix, "sats": self.int_sats, "hAccM": round(self.int_hacc, 1),
                        "ageS": round(now - self.int_last, 1) if self.int_last else None},
           "t": _wall()}

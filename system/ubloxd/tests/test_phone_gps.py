@@ -150,15 +150,22 @@ def test_fused_output_carries_satellite_time(clock, mux):
   mux.poll(pm)
   stamp = pm.sent[-1].gpsLocationExternal.unixTimestampMillis / 1e3
   assert abs(stamp - (sat + 0.5)) < 0.01                       # timed sees a 1 h difference and fixes the clock
-  # timed resets the clock: the offset is kept against the monotonic clock, so the stamps don't chase it
+  # timed resets the clock: the filter and the offset run on the monotonic clock, so neither notices
+  n = len(pm.sent)
   clock["wall"] += 3600.0
   clock["tick"](0.5)
-  assert abs(mux.sat_time() - (sat + 1.0)) < 0.01
-  mux.internal(comma_fix(sat + 1.0))                           # next comma fix (the filter resumes on it)
-  send_udp(mux, RMC_NO_FIX)
   mux.poll(pm)
+  assert len(pm.sent) == n + 1                                 # no pause after the correction
   assert abs(pm.sent[-1].gpsLocationExternal.unixTimestampMillis / 1e3 - (sat + 1.0)) < 0.01
-  assert abs(mux.time_offset - (sat - 1000.0)) < 0.01         # unchanged by the clock reset
+  assert abs(mux.time_offset - (sat - 1000.0)) < 0.01
+
+
+def test_late_fix_is_placed_at_its_satellite_time(clock, mux):
+  sat = clock["wall"] + 3600.0                                 # wrong comma clock: the fix's age comes from the offset
+  mux.internal(comma_fix(sat))
+  clock["tick"](1.0)
+  assert abs(mux.fix_mono(sat + 0.4, "phone") - (clock["mono"] - 0.6)) < 1e-6   # sent 0.6 s ago
+  assert mux.fix_mono(0.0, "phone", time_ok=False) == clock["mono"] - 0.4      # unreadable time: usual delay
 
 
 def test_one_far_off_reading_moves_time_only_a_little(clock, mux):

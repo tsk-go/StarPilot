@@ -144,10 +144,13 @@ def setup_feed(tmp_path, monkeypatch, params):
   return feed, mem
 
 
+WAIT_S = 5.0  # a busy test machine can be slow; a lookup still running after this is a real failure
+
+
 def wait(feed):
-  for _ in range(100):
-    if not feed._geocode_inflight:
-      return
+  deadline = time.monotonic() + WAIT_S
+  while feed._geocode_inflight:
+    assert time.monotonic() < deadline, f"address lookup still running after {WAIT_S:.0f} s"
     time.sleep(0.01)
 
 
@@ -296,9 +299,9 @@ def disagreeing_hybrid(tmp_path, monkeypatch, sess):
 
 
 def wait_via(hy):
-  for _ in range(100):
-    if not hy._via_inflight:
-      return
+  deadline = time.monotonic() + WAIT_S
+  while hy._via_inflight:
+    assert time.monotonic() < deadline, f"street lookup still running after {WAIT_S:.0f} s"
     time.sleep(0.01)
 
 
@@ -355,3 +358,34 @@ def test_signpost_and_later_step():
   r = waze_parser.compare(w, mb, up)
   assert r["wazeAgree"] is True and r["wazeWhy"] == "later step"
   assert waze_parser.compare(w, mb, [("Take the ramp toward Belt Parkway West", 9000.0)])["wazeAgree"] is False
+
+
+def test_timers_ignore_a_clock_correction(tmp_path, monkeypatch):
+  """timed can move the wall clock (GPS time) at any moment; retry and freshness are timed on the monotonic clock."""
+  params = FakeParams({"MapboxPublicKey": "pk.x"})
+  feed, _ = setup_feed(tmp_path, monkeypatch, params)
+  feed._session = FailSess()
+  monkeypatch.setattr(waze_bridge, "NET_RETRY_S", 0.05)
+  feed.ingest(real_split_screen(sheet=True))
+  wait(feed)
+  assert "NavDestination" not in params.d
+  wall = waze_bridge._wall()
+  monkeypatch.setattr(waze_bridge, "_wall", lambda: wall - 3600.0)    # clock corrected back an hour
+  feed._session.fail = False
+  time.sleep(0.06)
+  feed.ingest(real_split_screen())                                    # the retry still comes after 0.05 s
+  wait(feed)
+  assert json.loads(params.d["NavDestination"])["latitude"] == 40.1
+  assert waze_bridge.load_state() is not None                        # the state file is still fresh
+
+
+def test_state_file_age_is_monotonic(tmp_path, monkeypatch):
+  params = FakeParams()
+  feed, _ = setup_feed(tmp_path, monkeypatch, params)
+  feed.ingest(real_split_screen())
+  assert waze_bridge.load_state() is not None
+  monkeypatch.setattr(waze_bridge, "_wall", lambda: 0.0)              # a wall clock jump changes nothing
+  assert waze_bridge.load_state() is not None
+  mono = time.monotonic() + waze_bridge.FRESH_S + 1
+  monkeypatch.setattr(waze_bridge.time, "monotonic", lambda: mono)
+  assert waze_bridge.load_state() is None

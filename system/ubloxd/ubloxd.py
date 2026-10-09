@@ -11,6 +11,7 @@ from cereal import messaging
 from openpilot.system.ubloxd.generated.ubx import Ubx
 from openpilot.system.ubloxd.generated.gps import Gps
 from openpilot.system.ubloxd.generated.glonass import Glonass
+from openpilot.system.ubloxd.phone_gps import GpsMux
 
 
 SECS_IN_MIN = 60
@@ -496,9 +497,11 @@ def main():
   parser = UbloxMsgParser()
   pm = messaging.PubMaster(['ubloxGnss', 'gpsLocationExternal'])
   sock = messaging.sub_sock('ubloxRaw', timeout=100, conflate=False)
+  mux = GpsMux()  # StarView: phone GPS over Wi-Fi when the comma's own is jammed
 
   while True:
     msg = messaging.recv_one(sock)
+    mux.poll(pm)
     if msg is None:
       continue
 
@@ -513,6 +516,8 @@ def main():
       if not res:
         continue
       service, dat = res
+      if service == 'gpsLocationExternal' and not mux.internal(dat):
+        continue
       pm.send(service, dat)
 
 if __name__ == '__main__':
